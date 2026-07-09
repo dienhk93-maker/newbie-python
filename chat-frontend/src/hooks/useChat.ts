@@ -44,7 +44,11 @@ export const useChat = () => {
                     "Content-Type": "application/json",
                     ...(token ? { "Authorization": `Bearer ${token}` } : {})
                 },
-                body: JSON.stringify({ prompt: prompt.trim(), limit: 5 }),
+                body: JSON.stringify({ 
+                    prompt: prompt.trim(), 
+                    limit: 5,
+                    messages: messages.map(m => ({ role: m.role, content: m.content }))
+                }),
                 signal: abortController.signal
             });
 
@@ -101,7 +105,7 @@ export const useChat = () => {
         } finally {
             setIsStreaming(false);
         }
-    }, [isStreaming]);
+    }, [messages, isStreaming, token]);
 
     const stopStreaming = useCallback(() => {
         if (abortControllerRef.current) {

@@ -1,4 +1,5 @@
 import React from 'react';
+import ReactMarkdown from 'react-markdown';
 import type { MessageType } from '../types/chat';
 
 interface MessageProps {
@@ -40,14 +41,65 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
               : `bg-white/[0.06] border border-white/[0.08] text-gray-100 rounded-tl-sm ${message.isError ? 'border-red-500/30 bg-red-500/5' : ''}`,
           ].join(' ')}
         >
-          {message.content.split('\n').map((line, i, arr) => (
-            <React.Fragment key={i}>
-              {line}
-              {i < arr.length - 1 && <br />}
-            </React.Fragment>
-          ))}
-          {message.isStreaming && (
-            <span className="inline-block w-2 h-4 bg-purple-400 rounded-sm ml-1 align-middle animate-pulse" />
+          {isUser ? (
+            /* User messages: plain text, preserve line breaks */
+            message.content.split('\n').map((line, i, arr) => (
+              <React.Fragment key={i}>
+                {line}
+                {i < arr.length - 1 && <br />}
+              </React.Fragment>
+            ))
+          ) : (
+            /* AI messages: full Markdown rendering */
+            <>
+              <ReactMarkdown
+                components={{
+                  h1: ({ children }) => <h1 className="text-base font-bold text-white mt-3 mb-1 first:mt-0">{children}</h1>,
+                  h2: ({ children }) => <h2 className="text-sm font-bold text-indigo-300 mt-3 mb-1 first:mt-0">{children}</h2>,
+                  h3: ({ children }) => <h3 className="text-sm font-semibold text-purple-300 mt-2 mb-0.5 first:mt-0">{children}</h3>,
+                  p: ({ children }) => <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>,
+                  ul: ({ children }) => <ul className="list-none space-y-1 mb-2 pl-1">{children}</ul>,
+                  ol: ({ children }) => <ol className="list-decimal list-inside space-y-1 mb-2 pl-1">{children}</ol>,
+                  li: ({ children }) => (
+                    <li className="flex items-start gap-2">
+                      <span className="text-indigo-400 mt-1 flex-shrink-0">•</span>
+                      <span>{children}</span>
+                    </li>
+                  ),
+                  strong: ({ children }) => <strong className="font-semibold text-white">{children}</strong>,
+                  em: ({ children }) => <em className="italic text-gray-300">{children}</em>,
+                  code: ({ children, className }) => {
+                    const isBlock = className?.includes('language-');
+                    return isBlock ? (
+                      <code className="block bg-black/40 border border-white/10 rounded-lg px-3 py-2 my-2 text-xs font-mono text-green-300 overflow-x-auto">
+                        {children}
+                      </code>
+                    ) : (
+                      <code className="bg-white/10 text-purple-300 rounded px-1 py-0.5 text-xs font-mono">
+                        {children}
+                      </code>
+                    );
+                  },
+                  pre: ({ children }) => <pre className="overflow-x-auto">{children}</pre>,
+                  blockquote: ({ children }) => (
+                    <blockquote className="border-l-2 border-indigo-500/50 pl-3 italic text-gray-400 my-2">
+                      {children}
+                    </blockquote>
+                  ),
+                  hr: () => <hr className="border-white/10 my-3" />,
+                  a: ({ href, children }) => (
+                    <a href={href} target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:text-indigo-300 underline underline-offset-2 transition-colors">
+                      {children}
+                    </a>
+                  ),
+                }}
+              >
+                {message.content}
+              </ReactMarkdown>
+              {message.isStreaming && (
+                <span className="inline-block w-2 h-4 bg-purple-400 rounded-sm ml-1 align-middle animate-pulse" />
+              )}
+            </>
           )}
         </div>
       </div>

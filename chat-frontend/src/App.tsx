@@ -6,10 +6,10 @@ import { useAuth } from './contexts/AuthContext';
 import { AuthScreen } from './components/auth/AuthScreen';
 
 const SUGGESTIONS = [
-  { icon: '🔍', text: 'Tìm kiếm thông tin về AI Agents' },
-  { icon: '💡', text: 'Giải thích Retrieval-Augmented Generation' },
-  { icon: '⚡', text: 'So sánh LangChain và LangGraph' },
-  { icon: '🛠️', text: 'Hướng dẫn xây dựng chatbot với FastAPI' },
+  { icon: '🔍', text: 'Tìm agency chuyên về React Native, ngân sách 10.000 USD' },
+  { icon: '🏢', text: 'Agency fintech có đội ngũ trên 20 người' },
+  { icon: '🤖', text: 'Công ty AI/ML ở Việt Nam, giá dưới 5000 USD' },
+  { icon: '🛠️', text: 'Agency full-stack chuyên Node.js và React' },
 ];
 
 function App() {

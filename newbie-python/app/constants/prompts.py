@@ -48,12 +48,11 @@ Important extraction rules:
    - Do not include budget/team_size numbers unless they are semantically important.
 
 6. is_sufficient:
-   - Return true if the request has enough information to search.
-   - Usually true if at least one of these is provided: domain, tech_stack, budget, team_size.
-   - Return false if the request is too vague, such as "find me an agency" without context.
+   - Return true ONLY if ALL four fields are provided: domain, tech_stack, budget, AND team_size.
+   - Return false if ANY of these four fields are missing or null.
 
 7. missing_fields:
-   - If is_sufficient is false, list important missing fields.
+   - If is_sufficient is false, list ALL the missing fields.
    - Possible values: "domain", "budget", "team_size", "tech_stack".
 
 8. follow_up_question:

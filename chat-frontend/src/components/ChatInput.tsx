@@ -47,7 +47,6 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onSend, isStreaming, onSto
         value={input}
         onChange={(e) => setInput(e.target.value)}
         onKeyDown={handleKeyDown}
-        disabled={isStreaming}
       />
 
       {/* Character count */}

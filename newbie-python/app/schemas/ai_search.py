@@ -23,5 +23,6 @@ class SearchFilters(BaseModel):
 class AISearchRequest(BaseModel):
     prompt: str = Field(..., description="The search query from the user")
     limit: int = Field(default=5, description="Number of results to return")
+    messages: Optional[List[dict]] = Field(default=None, description="Previous conversation history")
 
 
