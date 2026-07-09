@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Chat Streaming Test</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f4f4f9; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .chat-container { width: 400px; background: white; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); display: flex; flex-direction: column; overflow: hidden; }
+        .chat-box { flex: 1; height: 400px; padding: 20px; overflow-y: auto; border-bottom: 1px solid #ddd; }
+        .message { margin-bottom: 15px; line-height: 1.5; }
+        .user-message { color: #0056b3; font-weight: bold; }
+        .ai-message { color: #333; }
+        .input-box { display: flex; padding: 10px; background: #fafafa; }
+        input[type="text"] { flex: 1; padding: 10px; border: 1px solid #ccc; border-radius: 4px; outline: none; }
+        button { padding: 10px 15px; margin-left: 10px; border: none; background: #0056b3; color: white; border-radius: 4px; cursor: pointer; }
+        button:disabled { background: #ccc; }
+    </style>
+</head>
+<body>
+
+<div class="chat-container">
+    <div class="chat-box" id="chat-box"></div>
+    <div class="input-box">
+        <input type="text" id="prompt-input" placeholder="Type your message..." />
+        <button id="send-btn" onclick="sendMessage()">Send</button>
+    </div>
+</div>
+
+<script>
+    const chatBox = document.getElementById("chat-box");
+    const input = document.getElementById("prompt-input");
+    const sendBtn = document.getElementById("send-btn");
+
+    async function sendMessage() {
+        const prompt = input.value.trim();
+        if (!prompt) return;
+
+        // Display user message
+        appendMessage("You", prompt, "user-message");
+        input.value = "";
+        sendBtn.disabled = true;
+
+        // Create container for AI message
+        const aiMessageDiv = appendMessage("AI", "", "ai-message");
+
+        try {
+            const response = await fetch("http://localhost:8000/api/v1/ai-search/chat/stream", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ prompt: prompt, limit: 5 })
+            });
+
+            if (!response.body) throw new Error("ReadableStream not supported in this browser.");
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder("utf-8");
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                const chunkText = decoder.decode(value, { stream: true });
+                
+                // SSE chunks are formatted as "data: <text>\n\n"
+                // We need to parse this format
+                const lines = chunkText.split("\n");
+                for (const line of lines) {
+                    if (line.startsWith("data: ")) {
+                        const data = line.replace("data: ", "");
+                        aiMessageDiv.innerHTML += data.replace(/\n/g, "<br>");
+                        chatBox.scrollTop = chatBox.scrollHeight;
+                    }
+                }
+            }
+        } catch (error) {
+            aiMessageDiv.innerHTML += `<br><span style="color: red;">[Connection Error]</span>`;
+            console.error(error);
+        } finally {
+            sendBtn.disabled = false;
+        }
+    }
+
+    function appendMessage(sender, text, className) {
+        const div = document.createElement("div");
+        div.className = `message ${className}`;
+        div.innerHTML = `<strong>${sender}:</strong> <span>${text}</span>`;
+        chatBox.appendChild(div);
+        chatBox.scrollTop = chatBox.scrollHeight;
+        return div.querySelector("span");
+    }
+
+    // Allow hitting Enter to send
+    input.addEventListener("keypress", function(event) {
+        if (event.key === "Enter") sendMessage();
+    });
+</script>
+
+</body>
+</html>

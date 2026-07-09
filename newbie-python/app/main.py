@@ -1,0 +1,61 @@
+import sys
+from pathlib import Path
+from app.database import connection
+
+from fastapi import FastAPI
+from contextlib import asynccontextmanager
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+
+from app.api.v1.common import router as common_router
+from app.api.v1.user import router as user_router
+from app.api.v1.auth import router as auth_router
+from app.api.v1.profile import router as profile_router
+from app.api.v1.ai_search import router as ai_search_router
+from app.utils.error.error_handler import register_exception_handlers
+from dishka import make_async_container
+from dishka.integrations.fastapi import setup_dishka
+from app.core.di import ServiceProvider, QdrantProvider
+from app.services.qdrant_service import QdrantService
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Mongo init
+    await connection.init()
+    
+    # Qdrant init
+    async with container() as request_container:
+        qdrant_service = await request_container.get(QdrantService)
+        await qdrant_service.ensure_collection()
+
+    yield
+    # Shutdown
+    await app.state.dishka_container.close()
+
+from fastapi.middleware.cors import CORSMiddleware
+
+app = FastAPI(lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Register exception handlers
+register_exception_handlers(app)
+
+# Register routers
+app.include_router(common_router)
+app.include_router(auth_router, prefix="/api/v1")
+app.include_router(user_router, prefix="/api/v1")
+app.include_router(profile_router, prefix="/api/v1")
+app.include_router(ai_search_router, prefix="/api/v1")
+
+# Setup Dishka
+container = make_async_container(ServiceProvider(), QdrantProvider())
+setup_dishka(container, app)
