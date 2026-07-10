@@ -1,0 +1,64 @@
+# Phụ hồi & Nâng Cấp Hệ thống AI Search cho Profile Agency
+
+Chuyến nâng cấp này sẽ giải quyết tận gốc vấn đề hard-code (Lọc cứng) và đem lại tính linh hoạt cho hệ thống khi Agency tự do điền thông tin Profile mà không bị bó hẹp trong danh sách có sẵn.
+
+## User Review Required
+
+> [!CAUTION]
+> - Việc đổi Index Database từ `MatchAny` sang `MatchText` trong thuật toán tìm kiếm của Qdrant có nghĩa là Vector database sẽ làm mới lại logic index. Bạn có chắc chắn muốn bỏ Index cũ của collection hiện tại hay tạo hẳn Collection mới? Theo Plan, mình sẽ Override lại Index trên collection hiện tại.
+
+## Proposed Changes
+
+### 1. Database & Schema
+Cập nhật Schema Profile và Mở lại Schema Search linh hoạt để AI tuỳ ý map tags.
+
+#### [MODIFY] `app/schemas/profile.py` & `app/models/profile.py`
+- Thêm trường `tech_stack: list[str] = Field(default_factory=list)` vào Model `Profile` và các Schema Request/Response liên đới để Agency được quyền lưu công nghệ của họ.
+
+#### [MODIFY] `app/schemas/ai_search.py`
+- Tháo (Remove) `Literal` đã áp dụng trước đó ở 2 biến `domain` và `tech_stack`, trả nó về Type mặc định là cơ bản `list[str]`. Trả lại nguyên dạng tự do cho Khách hàng search.
+
+---
+
+### 2. Search & Text Indexing
+Sử dụng Text Search BM25 Native của Qdrant thay vì Keyword Filter.
+
+#### [MODIFY] `app/services/qdrant_service.py`
+- Trong hàm `ensure_collection()`, tạo payload Index cho 2 trường `domain` và `tech_stack` bằng `models.TextIndexParams(type="text", tokenizer=models.TokenizerType.WORD, lowercase=True)`. Điều này giúp Qdrant chủ động tự động bóc tách các tag ra làm token để search (vd: Node.JS -> nodejs).
+
+#### [MODIFY] `app/services/ai_search_service.py`
+- Tại hàm `search_agencies()`:
+  - Khi `filters.domain` và `filters.tech_stack` có giá trị, chuyển Logic Qdrant Filter từ `MatchAny` (chính xác tuyệt đối mảng array) sang dạng lặp vòng và tạo điều kiện `models.MatchText(text=X)` (Tìm dính dáng văn bản).
+
+---
+
+### 3. Background Async Updates
+Cơ chế tự động Embeddings thông tin của Agency khi họ vừa tạo / cập nhật Profile (Background Tasks).
+
+#### [MODIFY] `app/core/di.py`
+- Bổ sung Provider `get_profile_service` vào DI Container Dishka. Inject thêm `QdrantService` và `OpenAIService` cho Service này. (Dường như File này hiện đang sót hàm get_profile_service dẫn đến API Create Profile sẽ bị sụp nguồn).
+
+#### [MODIFY] `app/services/profile_service.py`
+- Bổ sung hàm Background `sync_profile_to_qdrant(profile: Profile)`:
+  - Hàm này sẽ nối gộp Bio + Domain + TechStack của Profile đó thành 1 câu `semantic_description` hoàn chỉnh.
+  - Gọi OpenAI API để lấy Vector nhúng của nó.
+  - Update vào Qdrant với ID là MongoDB ID của chính Profile đó.
+
+#### [MODIFY] `app/api/v1/profile.py`
+- Đưa `BackgroundTasks` từ FastAPI vào param Endpoint tạo Profile.
+- Ngay khi `ProfileService` lưu MongoDB thành công, đẩy lệnh `sync_profile_to_qdrant` vào hàng đợi chạy ngầm (return response ngay lập tức không bắt user chờ 2.5s gọi API OpenAI).
+
+## Open Questions
+
+> [!IMPORTANT]
+> 1. Hiện tại Mock Data của `AiSearchService.seed_mock_agencies` đang có sẵn. Việc thay đổi Qdrant index (MatchText) có thể chỉ ảnh hưởng nhẹ với collection này. Bạn có muốn cho Reset & Chạy lại seed_data từ đầu sau khi merge Code này không?
+> 2. Có muốn áp dụng Background Task cho cả phương thức `Cập nhật Profile` thay vì chỉ `Tạo Profile` không?
+
+## Verification Plan
+
+### Automated Tests
+- Kiểm tra Endpoint `GET /docs` xem API còn load được cấu trúc Pydantic không.
+
+### Manual Verification
+- Dùng Curl để Hit Endpoint `/api/v1/profiles` -> Kiểm tra DB Mongo có lưu thêm `tech_stack`. Server Log có hiển thị Background task bắn sang OpenAI để update Vector.
+- Dùng giao diện Chat -> Yêu cầu tìm đúng Profile tự tạo với một domain lạ như: "Cyber-security", kiểm tra xem LangGraph flow có lấy ra được kết quả mượt mà của Node Text Search không thay vì `[]`.

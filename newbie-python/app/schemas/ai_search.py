@@ -12,8 +12,9 @@ class SearchFilters(BaseModel):
     confidence: float = Field(ge=0, le=1)
     budget: Optional[NumbericFilter] = None
     team_size: Optional[NumbericFilter] = None
-    domain: List[str] = Field(default_factory=list)
-    tech_stack: list[str] = Field(default_factory=list)
+    # Use Literal to force LLM to pick exactly matching predefined tags
+    domain: List[Literal["web development", "chat", "e-commerce", "outsourcing"]] = Field(default_factory=list)
+    tech_stack: list[Literal["Node.js", "React", "Golang", "Python", "FastAPI", "WebRTC"]] = Field(default_factory=list)
     semantic_query: str
     missing_fields: list[str] = Field(default_factory=list)
     follow_up_question: str | None = None

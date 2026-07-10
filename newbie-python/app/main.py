@@ -13,16 +13,12 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
-from app.api.v1.common import router as common_router
-from app.api.v1.user import router as user_router
-from app.api.v1.auth import router as auth_router
-from app.api.v1.profile import router as profile_router
-from app.api.v1.ai_search import router as ai_search_router
 from app.utils.error.error_handler import register_exception_handlers
 from dishka import make_async_container
 from dishka.integrations.fastapi import setup_dishka
 from app.core.di import ServiceProvider, QdrantProvider
 from app.services.qdrant_service import QdrantService
+from app.api.router.index import setup_routers
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -53,12 +49,8 @@ app.add_middleware(
 # Register exception handlers
 register_exception_handlers(app)
 
-# Register routers
-app.include_router(common_router)
-app.include_router(auth_router, prefix="/api/v1")
-app.include_router(user_router, prefix="/api/v1")
-app.include_router(profile_router, prefix="/api/v1")
-app.include_router(ai_search_router, prefix="/api/v1")
+# Router
+setup_routers(app)
 
 # Setup Dishka
 container = make_async_container(ServiceProvider(), QdrantProvider())
