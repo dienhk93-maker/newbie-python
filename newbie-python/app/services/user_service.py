@@ -25,7 +25,8 @@ class UserService:
             email=user_data.email,
             user_name=user_data.user_name,
             full_name=user_data.full_name,
-            hashed_password=hashed
+            hashed_password=hashed,
+            role=user_data.role
         )
         return await user.insert()
     

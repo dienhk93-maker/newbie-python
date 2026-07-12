@@ -21,6 +21,7 @@ import logging
 from typing import Any, Literal, Optional, cast, TypedDict
 
 from pydantic import SecretStr
+from langchain_core.runnables import RunnableConfig
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, BaseMessage
 from langchain_openai import ChatOpenAI
@@ -29,6 +30,9 @@ from langgraph.graph import StateGraph, END, START
 from app.config import settings
 from app.constants.prompts import AGENCY_EXTRACTION_PROMPT
 from app.schemas.ai_search import SearchFilters
+from app.utils.common.normalize import normalize_tech_list
+from app.utils.common.helpper import build_numeric_range_filter
+from qdrant_client import models
 
 logger = logging.getLogger(__name__)
 
@@ -101,144 +105,69 @@ _llm_structured = ChatOpenAI(
 
 
 # ---------------------------------------------------------------------------
-# 3.  MOCK DB HELPERS  (replace with real Qdrant / Motor calls later)
+# 3.  REAL DB SEARCH HELPER
 # ---------------------------------------------------------------------------
 
-async def _mock_qdrant_search(
-    semantic_query: str,
-    budget: Optional[NumericFilter],
-    team_size: Optional[NumericFilter],
-) -> list[dict]:
+def _build_qdrant_filter(
+    state: "AgentState",
+) -> models.Filter | None:
     """
-    Mock Qdrant vector search.
-
-    In production, replace this with:
-      - Get embedding for `semantic_query` via OpenAI Embeddings API.
-      - Build qdrant_client.models.Filter from budget / team_size conditions.
-      - Call AsyncQdrantClient.query_points(collection, vector, filter).
+    Build Qdrant filter from extracted state — same logic as
+    AiSearchService.search_agencies but reusable for the agent graph.
     """
-    logger.info("[MOCK Qdrant] Searching with query='%s'", semantic_query)
-    await asyncio.sleep(0)  # simulate I/O
+    must_conditions: list[models.FieldCondition] = []
+    should_conditions: list[models.FieldCondition] = []
 
-    # Static mock dataset matching the seeded data in AiSearchService
-    mock_results = [
-        {
-            "id": "qdrant-mock-001",
-            "score": 0.91,
-            "source": "qdrant",
-            "name": "WebCraft Studio",
-            "description": (
-                "A team of 15 members specialising in React and Node.js web development. "
-                "Typical project budget around 3 000 USD."
-            ),
-            "budget": 3000,
-            "team_size": 15,
-            "domain": ["web development"],
-            "tech_stack": ["Node.js", "React"],
-        },
-        {
-            "id": "qdrant-mock-002",
-            "score": 0.87,
-            "source": "qdrant",
-            "name": "RealTime Labs",
-            "description": (
-                "Expert team of 5 focusing on real-time chat apps, messaging, and video calls. "
-                "High quality app development, usually around 10 000 USD."
-            ),
-            "budget": 10000,
-            "team_size": 5,
-            "domain": ["chat", "real-time"],
-            "tech_stack": ["Node.js", "React", "WebRTC"],
-        },
-        {
-            "id": "qdrant-mock-003",
-            "score": 0.82,
-            "source": "qdrant",
-            "name": "CodeOutsource Co.",
-            "description": (
-                "Large outsourcing company with 50 developers. Handles e-commerce and core systems. "
-                "Very affordable, starting from 1 000 USD."
-            ),
-            "budget": 1000,
-            "team_size": 50,
-            "domain": ["e-commerce", "outsourcing"],
-            "tech_stack": ["Node.js", "Golang"],
-        },
-    ]
+    # Budget filter (hard constraint)
+    budget = state.get("budget")
+    if budget:
+        from app.schemas.ai_search import NumbericFilter
+        must_conditions.append(
+            build_numeric_range_filter(
+                field_name="budget",
+                numeric_filter=NumbericFilter(operator=budget["operator"], value=budget["value"]),
+            )
+        )
 
-    # Basic in-memory filter to simulate hard filters
-    def _passes(agency: dict) -> bool:
-        if budget:
-            op, val = budget["operator"], budget["value"]
-            b = agency["budget"]
-            if op == "<=" and not (b <= val): return False
-            if op == ">=" and not (b >= val): return False
-            if op == "<"  and not (b <  val): return False
-            if op == ">"  and not (b >  val): return False
-            if op == "="  and not (b == val): return False
-            if op == "between" and not (val[0] <= b <= val[1]): return False
+    # Team size filter (hard constraint)
+    team_size = state.get("team_size")
+    if team_size:
+        from app.schemas.ai_search import NumbericFilter
+        must_conditions.append(
+            build_numeric_range_filter(
+                field_name="team_size",
+                numeric_filter=NumbericFilter(operator=team_size["operator"], value=team_size["value"]),
+            )
+        )
 
-        if team_size:
-            op, val = team_size["operator"], team_size["value"]
-            t = agency["team_size"]
-            if op == "<=" and not (t <= val): return False
-            if op == ">=" and not (t >= val): return False
-            if op == "<"  and not (t <  val): return False
-            if op == ">"  and not (t >  val): return False
-            if op == "="  and not (t == val): return False
-            if op == "between" and not (val[0] <= t <= val[1]): return False
+    # Domain filter (soft constraint)
+    domain = state.get("domain", [])
+    if domain:
+        should_conditions.append(
+            models.FieldCondition(
+                key="domain",
+                match=models.MatchAny(any=domain),
+            )
+        )
 
-        return True
+    # Tech stack filter (soft constraint + normalize)
+    tech_stack = state.get("tech_stack", [])
+    if tech_stack:
+        normalized_tech = normalize_tech_list(tech_stack)
+        should_conditions.append(
+            models.FieldCondition(
+                key="tech_stack",
+                match=models.MatchAny(any=normalized_tech),
+            )
+        )
 
-    return [r for r in mock_results if _passes(r)]
+    if not must_conditions and not should_conditions:
+        return None
 
-
-async def _mock_mongodb_search(
-    domain: list[str],
-    tech_stack: list[str],
-) -> list[dict]:
-    """
-    Mock MongoDB metadata search.
-
-    In production, replace this with a Motor async query, e.g.:
-      collection.find({
-          "$or": [
-              {"domain": {"$in": domain}},
-              {"tech_stack": {"$in": tech_stack}},
-          ]
-      })
-    """
-    logger.info("[MOCK MongoDB] domain=%s  tech_stack=%s", domain, tech_stack)
-    await asyncio.sleep(0)  # simulate I/O
-
-    mongo_results = [
-        {
-            "id": "mongo-mock-A",
-            "source": "mongodb",
-            "name": "FinTech Wizards",
-            "description": "Boutique fintech agency building payment systems and trading platforms.",
-            "domain": ["fintech", "payments"],
-            "tech_stack": ["Python", "FastAPI", "React"],
-        },
-        {
-            "id": "mongo-mock-B",
-            "source": "mongodb",
-            "name": "MobileFirst Agency",
-            "description": "Award-winning mobile agency for iOS and Android with React Native.",
-            "domain": ["mobile app", "healthcare"],
-            "tech_stack": ["React Native", "Flutter"],
-        },
-    ]
-
-    def _matches(agency: dict) -> bool:
-        if domain and any(d in agency["domain"] for d in domain):
-            return True
-        if tech_stack and any(t in agency["tech_stack"] for t in tech_stack):
-            return True
-        # Return all records when no domain/tech filter is specified
-        return not domain and not tech_stack
-
-    return [r for r in mongo_results if _matches(r)]
+    return models.Filter(
+        must=must_conditions or None,
+        should=should_conditions or None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -385,53 +314,83 @@ async def ask_human_node(state: AgentState) -> dict:
     return {"messages": updated_messages}
 
 
-async def search_db_node(state: AgentState) -> dict:
+async def search_db_node(state: AgentState, config: RunnableConfig) -> dict:
     """
-    Node 4 – Database Search
-    -------------------------
-    Runs parallel searches against Qdrant (vector/semantic) and MongoDB
-    (structured metadata) using the extracted filters from the state.
-
-    Results from both sources are merged and de-duplicated by agency id
-    before being stored back in the state.
+    Node 4 – Database Search (Real Qdrant)
+    ----------------------------------------
+    Uses real QdrantService and OpenAIService passed via config["configurable"]
+    to perform vector search with extracted filters.
     """
-    logger.info("[search_db_node] Running parallel DB searches ...")
+    logger.info("[search_db_node] Running Qdrant search ...")
 
-    # Run both searches concurrently for maximum throughput
-    qdrant_task = _mock_qdrant_search(
-        semantic_query=state.get("semantic_query", ""),
-        budget=state.get("budget"),
-        team_size=state.get("team_size"),
+    # Get services from config (passed from API layer)
+    configurable = config.get("configurable", {})
+    qdrant_service = configurable.get("qdrant_service")
+    openai_service = configurable.get("openai_service")
+    profile_service = configurable.get("profile_service")
+
+    if not qdrant_service or not openai_service or not profile_service:
+        logger.error("[search_db_node] Missing qdrant_service, openai_service or profile_service in config!")
+        return {"results": []}
+
+    # 1. Get embedding for semantic query
+    semantic_query = state.get("semantic_query", "")
+    query_vector = await openai_service.get_embedding(semantic_query)
+
+    # 2. Build Qdrant filter from extracted state
+    query_filter = _build_qdrant_filter(state)
+
+    logger.info("[search_db_node] Filter: %s", query_filter)
+
+    # 3. Search Qdrant
+    results = await qdrant_service.search(
+        query_vector=query_vector,
+        limit=5,
+        filter_=query_filter,
     )
-    mongo_task = _mock_mongodb_search(
-        domain=state.get("domain", []),
-        tech_stack=state.get("tech_stack", []),
-    )
 
-    qdrant_results, mongo_results = await asyncio.gather(qdrant_task, mongo_task)
+    # 4. Extract MongoDB IDs and scores from Qdrant results
+    point_ids: list[str] = []
+    score_map: dict[str, float] = {}
 
-    logger.info(
-        "[search_db_node] Qdrant returned %d, MongoDB returned %d results",
-        len(qdrant_results),
-        len(mongo_results),
-    )
+    for point in results:
+        payload = point.payload or {}
+        mongo_id = payload.get("id")
+        if mongo_id:
+            point_ids.append(mongo_id)
+            score_map[mongo_id] = point.score
 
-    # Merge & deduplicate by 'id' — Qdrant results take precedence (higher rank).
-    # Guard against missing/None ids so we never call set.add(None), which would
-    # cause a Pyright type error and silently drop all id-less results as dupes.
-    seen_ids: set[str] = set()
-    merged: list[dict] = []
-    for result in [*qdrant_results, *mongo_results]:
-        rid: str | None = result.get("id")
-        if rid is None:
-            # No id field — include the result but don't track it for dedup
-            merged.append(result)
-            continue
-        if rid not in seen_ids:
-            seen_ids.add(rid)
-            merged.append(result)
+    logger.info("[search_db_node] Qdrant matched %d points with MongoDB IDs", len(point_ids))
 
-    return {"results": merged}
+    # 5. Hydrate with real-time data from MongoDB
+    profiles = await profile_service.get_profiles_by_ids(point_ids)
+    logger.info("[search_db_node] MongoDB returned %d profiles", len(profiles))
+
+    # 6. Format results — merge live MongoDB data with Qdrant score
+    formatted: list[dict] = []
+    for profile in profiles:
+        pid = str(profile.id)
+        user_name = "Unknown Agency"
+        if hasattr(profile, "user") and profile.user:
+            user_name = getattr(profile.user, "full_name", user_name)
+
+        formatted.append({
+            "id": pid,
+            "score": score_map.get(pid, 0.0),
+            "name": user_name,
+            "budget": profile.budget,
+            "team_size": profile.team_size,
+            "domain": profile.domain,
+            "tech_stack": profile.tech_stack,
+            "description": profile.bio or "",
+            "avatar": profile.avatar,
+        })
+
+    # Sort by Qdrant relevance score descending
+    formatted.sort(key=lambda x: x["score"], reverse=True)
+
+    logger.info("[search_db_node] Returning %d hydrated results", len(formatted))
+    return {"results": formatted}
 
 
 async def generator_node(state: AgentState) -> dict:

@@ -4,7 +4,7 @@ from typing import List
 from pydantic import BaseModel, Field
 
 class NumbericFilter(BaseModel):
-    operator: Literal["<", "<=", ">=", ">", "=", "between"]
+    operator: str
     value: float | int | list[float | int]
 
 class SearchFilters(BaseModel):
@@ -12,9 +12,8 @@ class SearchFilters(BaseModel):
     confidence: float = Field(ge=0, le=1)
     budget: Optional[NumbericFilter] = None
     team_size: Optional[NumbericFilter] = None
-    # Use Literal to force LLM to pick exactly matching predefined tags
-    domain: List[Literal["web development", "chat", "e-commerce", "outsourcing"]] = Field(default_factory=list)
-    tech_stack: list[Literal["Node.js", "React", "Golang", "Python", "FastAPI", "WebRTC"]] = Field(default_factory=list)
+    domain: list[str] = Field(default_factory=list)
+    tech_stack: list[str] = Field(default_factory=list)
     semantic_query: str
     missing_fields: list[str] = Field(default_factory=list)
     follow_up_question: str | None = None

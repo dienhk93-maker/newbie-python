@@ -50,10 +50,12 @@ Important extraction rules:
 6. is_sufficient:
    - Return true ONLY if ALL four fields are provided: domain, tech_stack, budget, AND team_size.
    - Return false if ANY of these four fields are missing or null.
+   - Do NOT evaluate the realism or logic of the budget or team size. If a number is provided for budget and team size, you MUST consider them as provided and set is_sufficient to true, regardless of how unrealistic they seem (e.g. 50 people for $1000).
 
 7. missing_fields:
    - If is_sufficient is false, list ALL the missing fields.
    - Possible values: "domain", "budget", "team_size", "tech_stack".
+   - Do NOT list a field as missing if the user provided a value for it.
 
 8. follow_up_question:
    - If is_sufficient is false, ask one short question to clarify the user's need.

@@ -1,3 +1,6 @@
+from app.services.profile_service import ProfileService
+from minio import Minio
+from app.services.storage_service import StorageService
 from dishka import Provider, Scope, provide
 from app.services.user_service import UserService
 from app.services.common_service import CommonService
@@ -36,6 +39,10 @@ class ServiceProvider(Provider):
     ) -> AiSearchService:
         return AiSearchService(openai_service, qdrant_service)
 
+    @provide
+    def get_profile_service(self, user_service: UserService, storage_service: StorageService, AiSearchService: AiSearchService) -> ProfileService:
+        return ProfileService(user_service, storage_service, AiSearchService)
+
 
 # Qdrant Provider
 class QdrantProvider(Provider):
@@ -65,3 +72,29 @@ class QdrantProvider(Provider):
             collection_name=settings.QDRANT_COLLECTION_NAME,
             embedding_size=settings.QDRANT_EMBEDDING_SIZE,
         )
+
+
+class MinIOProvider(Provider):
+    scope = Scope.APP
+
+    @provide
+    def get_settings(self) -> Settings:
+        return settings
+        
+    @provide
+    def get_storage_service(
+        self,
+        settings: Settings,
+    ) -> StorageService:
+        # Minio endpoint must not contain http:// or https://
+        endpoint = str(settings.MINIO_ENDPOINT).replace("http://", "").replace("https://", "")
+        
+        return StorageService(
+            client=Minio(
+                endpoint=endpoint,
+                access_key=str(settings.MINIO_ACCESS_KEY),
+                secret_key=str(settings.MINIO_SECRET_KEY),
+                secure=True if str(settings.MINIO_SECURE).lower() == "true" else False,
+            )
+        )
+    

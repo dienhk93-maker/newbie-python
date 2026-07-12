@@ -1,3 +1,4 @@
+from app.core.di import MinIOProvider
 import sys
 from pathlib import Path
 from app.database import connection
@@ -19,6 +20,7 @@ from dishka.integrations.fastapi import setup_dishka
 from app.core.di import ServiceProvider, QdrantProvider
 from app.services.qdrant_service import QdrantService
 from app.api.router.index import setup_routers
+from fastapi.middleware.cors import CORSMiddleware
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -34,7 +36,6 @@ async def lifespan(app: FastAPI):
     # Shutdown
     await app.state.dishka_container.close()
 
-from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(lifespan=lifespan)
 
@@ -53,5 +54,5 @@ register_exception_handlers(app)
 setup_routers(app)
 
 # Setup Dishka
-container = make_async_container(ServiceProvider(), QdrantProvider())
+container = make_async_container(ServiceProvider(), QdrantProvider(), MinIOProvider())
 setup_dishka(container, app)

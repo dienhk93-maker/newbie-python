@@ -4,9 +4,11 @@ from datetime import datetime, timezone
 from typing import Optional
 from app.constants.user_constant import Role
 
+from typing import Annotated
+
 class User(Document):
-    email: EmailStr = Indexed(unique=True)
-    user_name: str = Indexed(unique=True)
+    email: Annotated[EmailStr, Indexed(unique=True)]
+    user_name: Annotated[str, Indexed(unique=True)]
     full_name: str
     role: Role = Role.PO
     hashed_password: str
@@ -19,3 +21,4 @@ class User(Document):
         
     def __repr__(self):
         return f"<User {self.user_name}>"
+    

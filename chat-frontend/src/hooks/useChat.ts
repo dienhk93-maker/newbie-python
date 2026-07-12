@@ -5,7 +5,7 @@ import { useAuth } from '../contexts/AuthContext';
 const generateId = () => Math.random().toString(36).substring(2, 9);
 
 export const useChat = () => {
-    const { token } = useAuth();
+    const { token, logout } = useAuth();
     const [messages, setMessages] = useState<MessageType[]>([]);
     const [isStreaming, setIsStreaming] = useState<boolean>(false);
     const abortControllerRef = useRef<AbortController | null>(null);
@@ -51,6 +51,15 @@ export const useChat = () => {
                 }),
                 signal: abortController.signal
             });
+
+            if (response.status === 401) {
+                logout();
+                throw new Error("Session expired or unauthorized. Please sign in again.");
+            }
+
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
 
             if (!response.body) throw new Error("ReadableStream not supported in this browser.");
 
@@ -105,7 +114,7 @@ export const useChat = () => {
         } finally {
             setIsStreaming(false);
         }
-    }, [messages, isStreaming, token]);
+    }, [messages, isStreaming, token, logout]);
 
     const stopStreaming = useCallback(() => {
         if (abortControllerRef.current) {

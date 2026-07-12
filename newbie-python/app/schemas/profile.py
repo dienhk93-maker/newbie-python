@@ -9,12 +9,14 @@ from app.utils.validation.object_id_validation import PyObjectId
 
 
 class ProfileResponse(BaseModel):
-    user_id: PyObjectId
+    id: PyObjectId
+    user: Link[User]
     bio: Optional[str] = None
     website: Optional[str] = None
     phone: Optional[str] = None
     address: str
     avatar: Optional[str] = None
+    tech_stack: list[str] = Field(default_factory=list)
     domain: list[str] = Field(default_factory=list)
     team_size: int = 1
     budget: Optional[float]
@@ -32,5 +34,36 @@ class CreateProfileRequest(BaseModel):
     address: str
     avatar: Optional[str] = None
     domain: list[str] = Field(default_factory=list)
+    tech_stack: list[str] = Field(default_factory=list)
     team_size: int = 1
     budget: Optional[float]
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "bio": "Experienced backend developer specializing in FastAPI and MongoDB.",
+                    "website": "https://johndoe.dev",
+                    "phone": "+1-555-0123",
+                    "address": "123 Tech Lane, San Francisco, CA",
+                    "avatar": "https://example.com/avatars/johndoe.png",
+                    "domain": [
+                        "Software Engineering",
+                        "AI Research"
+                    ],
+                    "tech_stack": [
+                        "Nodejs",
+                        "MongoDB",
+                        "Reactjs"
+                    ],
+                    "team_size": 5,
+                    "budget": 15000.50
+                }
+            ]
+        }
+    }
+
+
+class UploadAvatarResponse(BaseModel):
+    avatar: str
+    message: str

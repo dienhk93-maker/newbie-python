@@ -1,3 +1,4 @@
+from uuid import UUID
 from typing import Any
 from qdrant_client import AsyncQdrantClient, models
 
@@ -78,4 +79,15 @@ class QdrantService:
             points_selector=models.PointIdsList(
                 points=ids,
             ),
+        )
+
+    async def upsert(self, id: UUID, vector: list[float], payload: dict[str, Any]) -> None:
+        point = models.PointStruct(
+                id=id,
+                vector=vector,
+                payload=payload,
+            )
+        await self.client.upsert(
+            collection_name=self.collection_name,
+            points=[point],
         )

@@ -51,9 +51,14 @@ def build_numeric_range_filter(
         )
 
     if operator == "=":
+        # Real-world: "khoảng/around" ≈ ±25% range thay vì exact match
+        tolerance = float(value) * 0.25
         return models.FieldCondition(
             key=field_name,
-            match=models.MatchValue(value=value),  # type: ignore[arg-type]
+            range=models.Range(
+                gte=float(value) - tolerance,
+                lte=float(value) + tolerance,
+            ),
         )
 
     raise ValueError(f"Unsupported operator: {operator}")

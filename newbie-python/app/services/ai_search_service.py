@@ -1,4 +1,6 @@
+from typing import Any
 from app.utils.common.helpper import build_numeric_range_filter
+from app.utils.common.normalize import normalize_tech_list
 import uuid
 from qdrant_client import models
 from app.services.openai_service import OpenAIService
@@ -62,14 +64,70 @@ class AiSearchService:
         )
         return {"status": "success", "inserted": len(mock_agencies)}
 
+
+    async def embedding_data(self, profile_data: Any) -> None:
+        """
+        Embeds a newly created profile and upserts it into Qdrant.
+        profile_data can be a dictionary or a Pydantic Profile model.
+        """
+        # Convert to dictionary if it's a Pydantic model
+        if hasattr(profile_data, "model_dump"):
+            profile_data = profile_data.model_dump(by_alias=True)
+            
+        # 1. Build the semantic text from profile data
+        bio = profile_data.get("bio") or ""
+        team_size = profile_data.get("team_size", 1)
+        address = profile_data.get("address", "")
+        budget = profile_data.get("budget", 0)
+        avatar = profile_data.get("avatar")
+        
+        domain_list = profile_data.get("domain", [])
+        tech_stack_list = normalize_tech_list(profile_data.get("tech_stack", []))
+        domain_str = ", ".join(domain_list)
+        tech_stack_str = ", ".join(tech_stack_list)
+
+        text_to_embed = (
+            f"{bio} "
+            f"We are a team of {team_size} members located in {address}. "
+            f"Our primary domains are {domain_str}. "
+            f"We use technologies such as {tech_stack_str}. "
+            f"Our typical budget is around {budget} USD."
+        )
+
+        # 2. Get the embedding vector from OpenAI
+        vector = await self.openai_service.get_embedding(text_to_embed)
+
+        # 3. Create a deterministic UUID for Qdrant from the MongoDB ObjectId
+        profile_id_str = str(profile_data.get("id") or profile_data.get("_id", uuid.uuid4()))
+
+        # 4. Prepare the payload for Qdrant filtering
+        payload = {
+            "id": profile_id_str,
+            "budget": budget,
+            "team_size": team_size,
+            "domain": domain_list,
+            "tech_stack": tech_stack_list,
+            "description": text_to_embed,
+            "avatar": avatar
+        }
+
+        # 5. Upsert to Qdrant
+        await self.qdrant_service.upsert(
+            id=uuid.uuid4(),
+            vector=vector,
+            payload=payload
+        )
+
     async def search_agencies(self, prompt: str, limit: int = 5):
         # 1. Extract Filters using LLM
         filters = await self.openai_service.extract_filters(prompt)
 
-        # 2. Build Qdrant Filter from JSON
+        # 2. Build Qdrant Filter
+        # must = hard constraints (budget, team_size) — bắt buộc phải đúng
+        # should = soft constraints (tech_stack, domain) — ưu tiên nhưng không loại bỏ hoàn toàn
         must_conditions = []
-        
-        
+        should_conditions = []
+
         if filters.budget is not None:
             must_conditions.append(
                 build_numeric_range_filter(
@@ -87,30 +145,31 @@ class AiSearchService:
                 )
             )
 
-        # 4. Domain filter
+        # 4. Domain filter — dùng should (OR) để partial match vẫn trả kết quả
         if filters.domain:
-            must_conditions.append(
+            should_conditions.append(
                 models.FieldCondition(
                     key="domain",
                     match=models.MatchAny(any=filters.domain),
                 )
             )
 
-        
+        # 5. Tech stack filter — normalize tên rồi dùng should
         if filters.tech_stack:
-            must_conditions.append(
+            normalized_tech = normalize_tech_list(filters.tech_stack)
+            should_conditions.append(
                 models.FieldCondition(
                     key="tech_stack",
-                    match=models.MatchAny(any=filters.tech_stack),
+                    match=models.MatchAny(any=normalized_tech),
                 )
             )
 
-
-        query_filter = (
-            models.Filter(must=must_conditions)
-            if must_conditions
-            else None
-        )
+        query_filter = None
+        if must_conditions or should_conditions:
+            query_filter = models.Filter(
+                must=must_conditions or None,
+                should=should_conditions or None,
+            )
 
         # 7. Generate vector for semantic query
         query_text = filters.semantic_query or prompt

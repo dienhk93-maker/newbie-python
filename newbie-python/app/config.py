@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL: str | None = None
     AI_MODEL: str | None = None
 
+    # MinIO
+    MINIO_ENDPOINT: str | None = None
+    MINIO_ACCESS_KEY: str | None = None
+    MINIO_SECRET_KEY: str | None = None
+    MINIO_BUCKET: str | None = None
+    MINIO_SECURE: bool = False
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
