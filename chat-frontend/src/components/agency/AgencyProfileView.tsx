@@ -1,21 +1,25 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useLocation } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
 
 export const AgencyProfileView: React.FC = () => {
   const navigate = useNavigate();
   const { id } = useParams<{ id: string }>();
   const { logout, userId, token } = useAuth();
+  const location = useLocation();
   
   const isViewOnly = Boolean(id && id !== userId);
   const targetUserId = id || userId;
+
+  // Use profile data passed via navigation state (from AgencyHome) if available
+  const initialProfileData = (location.state as any)?.profileData || null;
 
   const [userName, setUserName] = useState<string>('Agency User');
   const [avatarUrl, setAvatarUrl] = useState<string>('');
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [profileData, setProfileData] = useState<any>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const [profileData, setProfileData] = useState<any>(initialProfileData);
+  const [isLoading, setIsLoading] = useState(!initialProfileData);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   // Mock Upload state
@@ -24,18 +28,37 @@ export const AgencyProfileView: React.FC = () => {
   const defaultAvatar = "https://ui-avatars.com/api/?name=" + encodeURIComponent(userName) + "&background=4f46e5&color=fff";
 
   useEffect(() => {
+    // If we already have profile data from navigation state, just fetch the username
+    if (initialProfileData) {
+      if (initialProfileData.avatar) setAvatarUrl(initialProfileData.avatar);
+      const actualUserId = initialProfileData.user?.id || initialProfileData.user?.$id || targetUserId;
+      if (actualUserId && token) {
+        const abortController = new AbortController();
+        fetch(`http://localhost:8000/api/v1/users/${actualUserId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: abortController.signal
+        })
+        .then(res => res.ok ? res.json() : null)
+        .then(userData => {
+          if (userData?.user_name) setUserName(userData.user_name);
+          else if (userData?.full_name) setUserName(userData.full_name);
+        })
+        .catch(err => { if (err.name !== 'AbortError') console.error(err); });
+        return () => abortController.abort();
+      }
+      return;
+    }
+
+    // No navigation state — user navigated directly to this URL, fetch from API
+    const abortController = new AbortController();
+
     if (targetUserId && token) {
-      // We will fetch the username AFTER we get the profile to ensure we have the correct user ID 
-      // (in case targetUserId was a profile_id instead of a user_id).
-
-
-      // Fetch profile data
       fetch(`http://localhost:8000/api/v1/profiles/${targetUserId}`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { Authorization: `Bearer ${token}` },
+        signal: abortController.signal
       })
       .then(res => {
         if (!res.ok) {
-          // If no profile, redirect back to home to recreate
           navigate('/agency/home');
           return null;
         }
@@ -47,10 +70,10 @@ export const AgencyProfileView: React.FC = () => {
           if (data.avatar) setAvatarUrl(data.avatar);
           setIsLoading(false);
           
-          // Now fetch user name using the actual user ID from the profile
           const actualUserId = data.user?.id || data.user?.$id || targetUserId;
           fetch(`http://localhost:8000/api/v1/users/${actualUserId}`, {
-            headers: { Authorization: `Bearer ${token}` }
+            headers: { Authorization: `Bearer ${token}` },
+            signal: abortController.signal
           })
           .then(res => {
             if (res.ok) return res.json();
@@ -60,11 +83,19 @@ export const AgencyProfileView: React.FC = () => {
             if (userData?.user_name) setUserName(userData.user_name);
             else if (userData?.full_name) setUserName(userData.full_name);
           })
-          .catch(console.error);
+          .catch(err => {
+            if (err.name !== 'AbortError') console.error(err);
+          });
         }
       })
-      .catch(console.error);
+      .catch(err => {
+        if (err.name !== 'AbortError') console.error(err);
+      });
     }
+
+    return () => {
+      abortController.abort();
+    };
   }, [targetUserId, token, navigate]);
 
   useEffect(() => {

@@ -17,36 +17,53 @@ export const AgencyHome: React.FC = () => {
   const [isCheckingProfile, setIsCheckingProfile] = useState(true);
 
   useEffect(() => {
+    const abortController = new AbortController();
+
     if (userId && token) {
       // Fetch user profile to get username
       fetch(`http://localhost:8000/api/v1/users/${userId}`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { Authorization: `Bearer ${token}` },
+        signal: abortController.signal
       })
       .then(res => res.json())
       .then(data => {
         if (data.user_name) setUserName(data.user_name);
         if (data.full_name && !data.user_name) setUserName(data.full_name);
       })
-      .catch(console.error);
+      .catch(err => {
+        if (err.name !== 'AbortError') console.error(err);
+      });
 
       // Check if agency already created a profile
-      fetch(`http://localhost:8000/api/v1/profiles/me`, {
-        headers: { Authorization: `Bearer ${token}` }
+      fetch(`http://localhost:8000/api/v1/profiles/${userId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: abortController.signal
       })
       .then(res => {
-        if (res.ok) {
-          navigate('/agency/profile');
-        } else {
-          setIsCheckingProfile(false);
+        if (res.ok) return res.json();
+        setIsCheckingProfile(false);
+        return null;
+      })
+      .then(profileData => {
+        if (profileData) {
+          // Pass the already-fetched profile data via navigate state
+          // so AgencyProfileView doesn't need to fetch it again
+          navigate('/agency/profile', { state: { profileData } });
         }
       })
       .catch(err => {
-        console.error(err);
-        setIsCheckingProfile(false);
+        if (err.name !== 'AbortError') {
+          console.error(err);
+          setIsCheckingProfile(false);
+        }
       });
     } else {
       setIsCheckingProfile(false);
     }
+
+    return () => {
+      abortController.abort();
+    };
   }, [userId, token, navigate]);
 
   // Close dropdown when clicking outside
