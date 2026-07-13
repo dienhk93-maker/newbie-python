@@ -26,4 +26,16 @@ export const authService = {
     }
     return response.json();
   },
+
+  async refresh(refreshToken: string) {
+    const response = await fetch(`${API_URL}/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    });
+    if (!response.ok) {
+      throw new Error('Session expired');
+    }
+    return response.json();
+  },
 };

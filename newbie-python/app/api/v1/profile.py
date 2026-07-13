@@ -14,6 +14,15 @@ router = APIRouter(prefix="/profiles", tags=["Profiles"])
 async def create_profile(body: CreateProfileRequest, background_tasks: BackgroundTasks, profile_service: FromDishka[ProfileService], current_user_id: str = Depends(get_current_user_id)):
     return await profile_service.create_profile(current_user_id, body, background_tasks)
 
+@router.get("/{user_id}", response_model=ProfileResponse)
+@inject
+async def get_my_profile(
+    user_id: PyObjectId,
+    profile_service: FromDishka[ProfileService],
+    current_user_id: str = Depends(get_current_user_id)
+):
+    return await profile_service.get_my_profile(user_id)
+
 @router.post("/avatar/{profile_id}", response_model=UploadAvatarResponse)
 @inject
 async def upload_avatar(

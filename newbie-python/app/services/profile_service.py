@@ -1,3 +1,5 @@
+from bson import ObjectId
+from annotated_types import doc
 from app.schemas.profile import UploadAvatarResponse
 from app.constants.profile_constant import AVATAR_BUCKET
 from app.constants.profile_constant import AVATAR_FILE_TYPE_LIST
@@ -59,6 +61,18 @@ class ProfileService:
 
         return profile
         
+    async def get_my_profile(self, user_id: str) -> Profile:
+        from bson import ObjectId
+        # Support looking up by User ID or directly by Profile ID
+        profile = await Profile.find_one({
+            "$or": [
+                {"user.$id": ObjectId(user_id)},
+                {"_id": ObjectId(user_id)}
+            ]
+        })
+        if not profile:
+            raise NotFoundException("Profile not found")
+        return profile
 
 
     async def upload_avatar(
@@ -112,4 +126,4 @@ class ProfileService:
             
         results = await Profile.find(In(Profile.id, object_ids), fetch_links=True).to_list()
         _logger.info("[get_profiles_by_ids] Profiles found: %d", len(results))
-        return results
+        return results

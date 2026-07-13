@@ -8,7 +8,7 @@ export const SignIn: React.FC<{ onSwitch: () => void }> = ({ onSwitch }) => {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const { setToken } = useAuth();
+  const { setTokens } = useAuth();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -16,7 +16,7 @@ export const SignIn: React.FC<{ onSwitch: () => void }> = ({ onSwitch }) => {
     setError('');
     try {
       const data = await authService.login({ email, password });
-      setToken(data.access_token);
+      setTokens(data.access_token, data.refresh_token);
     } catch (err: any) {
       setError(err.message || 'Incorrect email or password. Please try again.');
     } finally {

@@ -5,7 +5,7 @@ import { useAuth } from '../contexts/AuthContext';
 const generateId = () => Math.random().toString(36).substring(2, 9);
 
 export const useChat = () => {
-    const { token, logout } = useAuth();
+    const { token, logout, refreshToken } = useAuth();
     const [messages, setMessages] = useState<MessageType[]>([]);
     const [isStreaming, setIsStreaming] = useState<boolean>(false);
     const abortControllerRef = useRef<AbortController | null>(null);
@@ -38,24 +38,34 @@ export const useChat = () => {
         abortControllerRef.current = abortController;
 
         try {
-            const response = await fetch("http://localhost:8000/api/v1/ai-search/chat/stream", {
-                method: "POST",
-                headers: { 
-                    "Content-Type": "application/json",
-                    ...(token ? { "Authorization": `Bearer ${token}` } : {})
-                },
-                body: JSON.stringify({ 
-                    prompt: prompt.trim(), 
-                    limit: 5,
-                    messages: messages.map(m => ({ role: m.role, content: m.content }))
-                }),
-                signal: abortController.signal
-            });
+            const makeRequest = async (authToken: string | null) => {
+                return fetch("http://localhost:8000/api/v1/ai-search/chat/stream", {
+                    method: "POST",
+                    headers: { 
+                        "Content-Type": "application/json",
+                        ...(authToken ? { "Authorization": `Bearer ${authToken}` } : {})
+                    },
+                    body: JSON.stringify({ 
+                        prompt: prompt.trim(), 
+                        limit: 5,
+                        messages: messages.map(m => ({ role: m.role, content: m.content }))
+                    }),
+                    signal: abortController.signal
+                });
+            };
+
+            let response = await makeRequest(token);
 
             if (response.status === 401) {
-                logout();
-                throw new Error("Session expired or unauthorized. Please sign in again.");
+                const newToken = await refreshToken();
+                if (newToken) {
+                    // Retry with new token
+                    response = await makeRequest(newToken);
+                } else {
+                    throw new Error("Session expired or unauthorized. Please sign in again.");
+                }
             }
+
 
             if (!response.ok) {
                 throw new Error(`HTTP error! status: ${response.status}`);
@@ -67,30 +77,66 @@ export const useChat = () => {
             const decoder = new TextDecoder("utf-8");
 
             let currentAiContent = '';
+            let buffer = '';
 
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
 
-                const chunkText = decoder.decode(value, { stream: true });
-                const lines = chunkText.split("\n");
+                buffer += decoder.decode(value, { stream: true });
 
-                for (const line of lines) {
-                    if (line.startsWith("data: ")) {
-                        const data = line.replace("data: ", "");
-                        const textChunk = data.replace(/\\n/g, "\n");
+                // SSE blocks are separated by double newlines
+                const blocks = buffer.split('\n\n');
+                // Keep last (possibly incomplete) block in buffer
+                buffer = blocks.pop() ?? '';
+
+                for (const block of blocks) {
+                    if (!block.trim()) continue;
+
+                    const lines = block.split('\n');
+                    let eventType = 'message'; // default SSE event
+                    const dataLines: string[] = [];
+
+                    for (const line of lines) {
+                        if (line.startsWith('event: ')) {
+                            eventType = line.slice(7).trim();
+                        } else if (line.startsWith('data: ')) {
+                            dataLines.push(line.slice(6));
+                        }
+                    }
+
+                    const rawData = dataLines.join('');
+                    if (!rawData) continue;
+
+                    if (eventType === 'search_results') {
+                        // Parse agency cards JSON → attach to AI message
+                        try {
+                            const agencies = JSON.parse(rawData);
+                            setMessages(prev =>
+                                prev.map(msg =>
+                                    msg.id === aiMsgId
+                                        ? { ...msg, agencies }
+                                        : msg
+                                )
+                            );
+                        } catch (e) {
+                            console.error('[useChat] Failed to parse search_results:', e);
+                        }
+                    } else {
+                        // Default: streaming text chunk
+                        const textChunk = rawData.replace(/\\n/g, '\n');
                         currentAiContent += textChunk;
-                        
-                        setMessages(prev => 
-                            prev.map(msg => 
-                                msg.id === aiMsgId 
-                                    ? { ...msg, content: currentAiContent } 
+                        setMessages(prev =>
+                            prev.map(msg =>
+                                msg.id === aiMsgId
+                                    ? { ...msg, content: currentAiContent }
                                     : msg
                             )
                         );
                     }
                 }
             }
+
 
             // Finalize AI message
             setMessages(prev => 

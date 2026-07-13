@@ -15,6 +15,7 @@ export const SignUp: React.FC<{ onSwitch: () => void }> = ({ onSwitch }) => {
     user_name: '',
     full_name: '',
     password: '',
+    role: 'PROJECT_OWNER',
   });
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
@@ -92,6 +93,39 @@ export const SignUp: React.FC<{ onSwitch: () => void }> = ({ onSwitch }) => {
               value={formData.full_name}
               onChange={handleChange}
             />
+          </div>
+        </div>
+
+        {/* Role Selection */}
+        <div className="space-y-2">
+          <label className="text-xs font-semibold text-gray-400 uppercase tracking-wider">I am a</label>
+          <div className="flex gap-3">
+            {[
+              { id: 'PROJECT_OWNER', label: 'Project Owner', icon: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 13.255A23.931 23.931 0 0112 15c-3.183 0-6.22-.62-9-1.745M16 6V4a2 2 0 00-2-2h-4a2 2 0 00-2 2v2m4 6h.01M5 20h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /> },
+              { id: 'AGENCY', label: 'Agency', icon: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /> }
+            ].map((r) => (
+              <label
+                key={r.id}
+                className={`flex-1 relative flex flex-col items-center justify-center p-3 rounded-xl border text-sm font-medium cursor-pointer transition-all duration-200 ${
+                  formData.role === r.id
+                    ? 'bg-purple-500/20 border-purple-500/50 text-purple-300 shadow-md shadow-purple-500/10'
+                    : 'bg-white/[0.04] border-white/10 text-gray-400 hover:bg-white/[0.08] hover:border-white/20'
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="role"
+                  value={r.id}
+                  checked={formData.role === r.id}
+                  onChange={handleChange}
+                  className="hidden"
+                />
+                <svg className="w-5 h-5 mb-1.5 opacity-80" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  {r.icon}
+                </svg>
+                {r.label}
+              </label>
+            ))}
           </div>
         </div>
 

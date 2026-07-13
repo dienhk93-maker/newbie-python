@@ -408,14 +408,19 @@ async def generator_node(state: AgentState) -> dict:
     results = state.get("results", [])
     logger.info("[generator_node] Generating response for %d results ...", len(results))
 
-    # Serialise results for the LLM context
-    results_json = json.dumps(results, ensure_ascii=False, indent=2)
+    # Strip unnecessary fields (like avatar URLs) to prevent the LLM from trying to render massive markdown images
+    llm_context_results = [
+        {k: v for k, v in r.items() if k not in ["avatar"]}
+        for r in results
+    ]
+    results_json = json.dumps(llm_context_results, ensure_ascii=False, indent=2)
 
     system_prompt = (
         "You are a helpful assistant for a software agency search platform. "
         "Given the following list of matching agencies (in JSON), write a clear, "
-        "concise, and friendly response summarising the top matches for the user. "
-        "Highlight each agency's name, budget, team size, domain, and tech stack. "
+        "concise, and friendly response summarising ALL the agencies provided in the list. "
+        "Do not omit any agency from your summary. Highlight each agency's name, budget, team size, domain, and tech stack. "
+        "Do NOT include any images, avatars, or markdown picture syntax in your response. "
         "If the list is empty, politely inform the user and suggest broadening the search. "
         "Reply in the same language as the user's last message.\n\n"
         f"Matching agencies:\n{results_json}"

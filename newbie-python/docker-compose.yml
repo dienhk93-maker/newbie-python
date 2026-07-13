@@ -1,4 +1,4 @@
-version: "3.8"
+# version: "3.8"
 
 services:
   mongodb:
@@ -29,8 +29,8 @@ services:
     command: server /data --console-address ":9001"
 
     environment:
-      MINIO_ROOT_USER: admin
-      MINIO_ROOT_PASSWORD: password123
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-password123}
 
     ports:
       - "9000:9000"
