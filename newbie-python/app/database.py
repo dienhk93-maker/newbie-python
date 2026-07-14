@@ -4,6 +4,7 @@ from beanie import init_beanie
 from app.config import settings
 from app.models.user import User
 from app.models.profile import Profile
+from app.models.conversation import Conversation
 
 class Database:
     client: AsyncMongoClient
@@ -20,7 +21,7 @@ class Database:
 
         await init_beanie(
             database=self.client[settings.MONGODB_DB],
-            document_models=[User, Profile],
+            document_models=[User, Profile, Conversation],
         )
 
     async def close(self):

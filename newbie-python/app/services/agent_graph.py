@@ -15,6 +15,8 @@ Graph topology:
                                     ↘ search_db_node  → generator_node → END
 """
 
+from pymongo import MongoClient
+from app.database import connection
 import asyncio
 import json
 import logging
@@ -33,6 +35,7 @@ from app.schemas.ai_search import SearchFilters
 from app.utils.common.normalize import normalize_tech_list
 from app.utils.common.helpper import build_numeric_range_filter
 from qdrant_client import models
+from langgraph.checkpoint.mongodb import MongoDBSaver
 
 logger = logging.getLogger(__name__)
 
@@ -446,8 +449,13 @@ async def generator_node(state: AgentState) -> dict:
             )
 
     logger.info("[generator_node] Response generated (%d chars)", len(full_response))
+    # Custom metadata include search data
+    final_ai_msg = AIMessage(
+        content=full_response,
+        response_metadata={"agencies": state.get("results", [])}
+    )
 
-    updated_messages = list(state["messages"]) + [AIMessage(content=full_response)]
+    updated_messages = list(state["messages"]) + [final_ai_msg]
     return {
         "messages": updated_messages,
         "results": results,      # keep results in state for the API layer to access
@@ -482,6 +490,9 @@ def build_search_agent():
 
     Returns the compiled graph (a LangGraph CompiledStateGraph).
     """
+
+    db_client = MongoClient(settings.MONGODB_URL)
+    checkpointer = MongoDBSaver(client=db_client, db_name=settings.MONGODB_DB)
 
     # -- Step 1: Create the StateGraph, declaring AgentState as the schema --
     # pyrefly: ignore [bad-specialization]
@@ -523,7 +534,7 @@ def build_search_agent():
 
     # -- Step 4: Compile the graph -------------------------------------------
     # compile() validates the graph structure and returns a runnable object.
-    compiled_graph = graph_builder.compile()
+    compiled_graph = graph_builder.compile(checkpointer=checkpointer)
     logger.info("[build_search_agent] Graph compiled successfully.")
     return compiled_graph
 
@@ -538,7 +549,7 @@ search_agent = build_search_agent()
 
 async def run_agent_turn(
     user_message: str,
-    history: list[BaseMessage] | None = None,
+    thread_id: str,
 ) -> dict:
     """
     Convenience wrapper to invoke the compiled graph for one conversational turn.
@@ -554,47 +565,24 @@ async def run_agent_turn(
           - "results"   : List of matched agencies (empty if clarification was needed).
           - "reply"     : The last AI message content (either follow-up Q or summary).
     """
-    history = history or []
 
-    # Append the new user message to the history
-    messages = list(history) + [HumanMessage(content=user_message)]
+    thread_config = {"configurable": {"thread_id": thread_id}}
 
-    # Build the initial state snapshot
-    initial_state: AgentState = {
-        "messages": messages,
-        "is_sufficient": False,
-        "budget": None,
-        "team_size": None,
-        "domain": [],
-        "tech_stack": [],
-        "semantic_query": "",
-        "missing_fields": [],
-        "results": [],
+    new_input = {
+        "messages": [HumanMessage(content=user_message)]
     }
 
-    # ainvoke runs the full graph asynchronously and returns the final state.
-    # LangGraph types ainvoke as returning `dict[str, Any] | Any`; use `cast`
-    # to tell the type checker this is our AgentState shape.
-    final_state: AgentState = cast(AgentState, await search_agent.ainvoke(initial_state))
+    final_state = await search_agent.ainvoke(new_input, config=thread_config)
 
     # Extract the last AI message as the "reply" for the API layer.
     # Guard against list-typed `.content` (same issue as in ask_human_node).
     last_ai_message = ""
     for msg in reversed(final_state["messages"]):
         if isinstance(msg, AIMessage):
-            raw = msg.content
-            last_ai_message = (
-                raw
-                if isinstance(raw, str)
-                else " ".join(
-                    part if isinstance(part, str) else str(part)
-                    for part in raw
-                )
-            )
+            last_ai_message = msg.content
             break
 
     return {
-        "messages": final_state["messages"],
         "results": final_state.get("results", []),
         "reply": last_ai_message,
     }

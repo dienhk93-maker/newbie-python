@@ -16,7 +16,6 @@ router = APIRouter(
     tags=["AI Search"],
 )
 
-
 @router.post("/seed")
 @inject
 async def seed_data(
@@ -24,7 +23,6 @@ async def seed_data(
 ):
     """Automatically generate 5 mock Agencies and save them to Qdrant"""
     return await ai_service.seed_mock_agencies()
-
 
 @router.post("/")
 @inject
@@ -37,7 +35,6 @@ async def search(
     return await ai_service.search_agencies(prompt=request.prompt, limit=request.limit)
 
 
-
 @router.post("/chat/stream")
 @inject
 async def chat_stream(
@@ -48,32 +45,31 @@ async def chat_stream(
     current_user_id: str = Depends(get_current_user_id)
 ):
     """Stream a chat response from LangGraph Agent"""
-    # Reconstruct history
-    history = []
-    if request.messages:
-        for msg in request.messages:
-            if msg.get("role") == "user":
-                history.append(HumanMessage(content=msg.get("content", "")))
-            elif msg.get("role") == "ai":
-                history.append(AIMessage(content=msg.get("content", "")))
-                
-    history.append(HumanMessage(content=request.prompt))
+    import uuid
+    from app.models.conversation import Conversation
 
-    initial_state = {
-        "messages": history,
-        "is_sufficient": False,
-        "budget": None,
-        "team_size": None,
-        "domain": [],
-        "tech_stack": [],
-        "semantic_query": "",
-        "missing_fields": [],
-        "results": [],
+    # Use provided thread_id or generate a new one
+    thread_id = request.thread_id or uuid.uuid4().hex
+
+    # Check if this conversation exists, if not, create it
+    existing_conv = await Conversation.find_one(Conversation.thread_id == thread_id)
+    if not existing_conv:
+        words = request.prompt.split()
+        title = " ".join(words[:10]) + ("..." if len(words) > 10 else "")
+        new_conv = Conversation(
+            thread_id=thread_id,
+            user_id=current_user_id,
+            title=title
+        )
+        await new_conv.insert()
+
+    new_input = {
+        "messages": [HumanMessage(content=request.prompt)]
     }
 
-    # Truyền real services vào LangGraph qua config["configurable"]
     config = {
         "configurable": {
+            "thread_id": thread_id,
             "qdrant_service": qdrant_service,
             "openai_service": openai_service,
             "profile_service": profile_service,
@@ -81,27 +77,58 @@ async def chat_stream(
     }
 
     async def event_generator():
-        async for event in search_agent.astream_events(initial_state, config=config, version="v2"):
-            # 1. Real-world pattern: Gửi raw data dạng JSON qua Custom SSE Event 
-            # để frontend tự do render ra thẻ UI thay vì ép chung vào luồng text markdown.
+        async for event in search_agent.astream_events(new_input, config=config, version="v2"):
             if event["event"] == "on_chain_end" and event.get("name") == "search_db_node":
                 node_output = event.get("data", {}).get("output", {})
                 results = node_output.get("results", [])
                 if results:
                     import json
                     json_data = json.dumps(results, ensure_ascii=False)
-                    # Yield event với tên 'search_results'
                     yield f"event: search_results\ndata: {json_data}\n\n"
 
-            # 2. Luồng text chat thông thường của LLM
             if event["event"] == "on_chat_model_stream":
                 node_name = event.get("metadata", {}).get("langgraph_node")
                 if node_name in ["generator_node", "ask_human_node"]:
                     chunk = event["data"]["chunk"].content
                     if isinstance(chunk, str) and chunk:
                         safe_chunk = chunk.replace("\n", "\\n")
-                        # Mặc định của SSE là event 'message'
                         yield f"data: {safe_chunk}\n\n"
             
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
+
+@router.get("/chat/{thread_id}/history")
+@inject
+async def get_chat_history(
+    thread_id: str,
+    current_user_id: str = Depends(get_current_user_id)
+):
+    """Retrieve chat history from LangGraph checkpointer"""
+    config = {"configurable": {"thread_id": thread_id}}
+    
+    # Sử dụng aget_state vì checkpointer là AsyncMongoDBSaver
+    state_snapshot = await search_agent.aget_state(config)
+    
+    messages_for_ui = []
+    if state_snapshot and getattr(state_snapshot, "values", None):
+        raw_messages = state_snapshot.values.get("messages", [])
+        for msg in raw_messages:
+            if isinstance(msg, HumanMessage):
+                messages_for_ui.append({"role": "user", "content": msg.content})
+            elif isinstance(msg, AIMessage):
+                if msg.content:
+                    agencies = msg.response_metadata.get("agencies", [])
+                    messages_for_ui.append({"role": "ai", "content": msg.content, "agencies": agencies})
+                
+    return {"history": messages_for_ui}
+
+
+@router.get("/conversations")
+async def get_conversations(
+    current_user_id: str = Depends(get_current_user_id)
+):
+    """Retrieve all conversations for the current round"""
+    from app.models.conversation import Conversation
+    # Ngược chiều kim đồng hồ thời gian tạo
+    convs = await Conversation.find(Conversation.user_id == current_user_id).sort("-created_at").to_list()
+    return {"conversations": convs}

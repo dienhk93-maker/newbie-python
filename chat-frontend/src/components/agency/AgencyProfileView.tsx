@@ -245,7 +245,7 @@ export const AgencyProfileView: React.FC = () => {
                   </div>
                 )}
              </button>
-             <h2 className="text-xl font-bold text-white tracking-wide text-center">{userName} Agency</h2>
+             <h2 className="text-xl font-bold text-white tracking-wide text-center">{userName}</h2>
              <span className="px-3 py-1 rounded-full bg-emerald-500/10 text-emerald-400 text-xs font-bold border border-emerald-500/20">
                Active
              </span>

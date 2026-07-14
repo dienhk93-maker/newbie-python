@@ -1,14 +1,110 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import type { MessageType } from '../types/chat';
 import { useAuth } from '../contexts/AuthContext';
 
 const generateId = () => Math.random().toString(36).substring(2, 9);
+const getOrCreateThreadId = () => {
+    let tid = sessionStorage.getItem('chat_thread_id');
+    if (!tid) {
+        tid = `thread_${generateId()}`;
+        sessionStorage.setItem('chat_thread_id', tid);
+    }
+    return tid;
+};
 
 export const useChat = () => {
     const { token, logout, refreshToken } = useAuth();
     const [messages, setMessages] = useState<MessageType[]>([]);
     const [isStreaming, setIsStreaming] = useState<boolean>(false);
+    const [isLoadingHistory, setIsLoadingHistory] = useState<boolean>(true);
+    const [conversations, setConversations] = useState<any[]>([]);
+    const [activeThreadId, setActiveThreadId] = useState<string>(getOrCreateThreadId());
+    
     const abortControllerRef = useRef<AbortController | null>(null);
+
+    // Fetch Sidebar Conversations
+    useEffect(() => {
+        const fetchConversations = async (authToken: string) => {
+            try {
+                let res = await fetch(`http://localhost:8000/api/v1/ai-search/conversations`, {
+                    headers: { "Authorization": `Bearer ${authToken}` }
+                });
+
+                if (res.status === 401) {
+                    const newToken = await refreshToken();
+                    if (newToken) {
+                        res = await fetch(`http://localhost:8000/api/v1/ai-search/conversations`, {
+                            headers: { "Authorization": `Bearer ${newToken}` }
+                        });
+                    }
+                }
+
+                if (res.ok) {
+                    const data = await res.json();
+                    setConversations(data.conversations || []);
+                }
+            } catch (err) {
+                console.error("Failed to fetch conversations:", err);
+            }
+        };
+        // Fetch only when NOT streaming, meaning a turn just ended (or just mounted)
+        if (token && !isStreaming) {
+            fetchConversations(token);
+        }
+    }, [token, isStreaming, refreshToken]);
+
+    // Fetch Chat History
+    useEffect(() => {
+        const fetchHistory = async (authToken: string) => {
+            setIsLoadingHistory(true);
+            try {
+                let res = await fetch(`http://localhost:8000/api/v1/ai-search/chat/${activeThreadId}/history`, {
+                    headers: { "Authorization": `Bearer ${authToken}` }
+                });
+
+                if (res.status === 401) {
+                    const newToken = await refreshToken();
+                    if (newToken) {
+                        res = await fetch(`http://localhost:8000/api/v1/ai-search/chat/${activeThreadId}/history`, {
+                            headers: { "Authorization": `Bearer ${newToken}` }
+                        });
+                    }
+                }
+
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.history && data.history.length > 0) {
+                        const historyMessages: MessageType[] = data.history.map((h: any) => ({
+                            id: generateId(),
+                            role: h.role,
+                            content: h.content,
+                            agencies: h.agencies, // Lấy mảng agencies được BE trích xuất từ metadata
+                        }));
+                        setMessages(historyMessages);
+                    } else {
+                        setMessages([]); // Reset to empty if new chat
+                    }
+                }
+            } catch (err) {
+                console.error("Failed to fetch chat history:", err);
+            } finally {
+                setIsLoadingHistory(false);
+            }
+        };
+        if (token) fetchHistory(token);
+    }, [token, activeThreadId, refreshToken]);
+
+    const selectConversation = useCallback((threadId: string) => {
+        sessionStorage.setItem('chat_thread_id', threadId);
+        setActiveThreadId(threadId);
+    }, []);
+
+    const createNewChat = useCallback(() => {
+        const newId = `thread_${generateId()}`;
+        sessionStorage.setItem('chat_thread_id', newId);
+        setActiveThreadId(newId);
+        setMessages([]);
+    }, []);
 
     const sendMessage = useCallback(async (prompt: string) => {
         if (!prompt.trim() || isStreaming) return;
@@ -48,7 +144,8 @@ export const useChat = () => {
                     body: JSON.stringify({ 
                         prompt: prompt.trim(), 
                         limit: 5,
-                        messages: messages.map(m => ({ role: m.role, content: m.content }))
+                        thread_id: activeThreadId
+                        // NO NEED TO SEND 'messages' array anymore!
                     }),
                     signal: abortController.signal
                 });
@@ -178,5 +275,15 @@ export const useChat = () => {
         }
     }, []);
 
-    return { messages, sendMessage, isStreaming, stopStreaming };
+    return { 
+        messages, 
+        sendMessage, 
+        isStreaming, 
+        stopStreaming, 
+        isLoadingHistory, 
+        conversations, 
+        activeThreadId, 
+        selectConversation, 
+        createNewChat 
+    };
 };
