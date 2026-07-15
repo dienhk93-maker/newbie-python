@@ -15,27 +15,34 @@ Graph topology:
                                     ↘ search_db_node  → generator_node → END
 """
 
+from app.schemas.ai_search import SearchNextGraph
+from app.constants.prompts import SUPERVISOR_SEARCH_NODE_PROMPT
 from pymongo import MongoClient
 from app.database import connection
 import asyncio
 import json
 import logging
-from typing import Any, Literal, Optional, cast, TypedDict
+from typing import Any, Literal, Optional, cast
+from typing_extensions import TypedDict
 
 from pydantic import SecretStr
 from langchain_core.runnables import RunnableConfig
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, BaseMessage
+from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END, START
+from langchain.agents import create_agent
 
 from app.config import settings
-from app.constants.prompts import AGENCY_EXTRACTION_PROMPT
+from app.constants.prompts import AGENCY_EXTRACTION_PROMPT, CONSULTANT_NODE_PROMPT
 from app.schemas.ai_search import SearchFilters
 from app.utils.common.normalize import normalize_tech_list
 from app.utils.common.helpper import build_numeric_range_filter
 from qdrant_client import models
 from langgraph.checkpoint.mongodb import MongoDBSaver
+from tavily import TavilyClient
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -79,22 +86,31 @@ class AgentState(TypedDict):
     missing_fields: list[str]
     results: list[dict]
 
+class SupervisorState(TypedDict):
+    messages: list[BaseMessage]
+    next_agent: Literal["consultant", "search_agent", "FINISH"]
+    results: list[dict]
+
+
 
 # ---------------------------------------------------------------------------
 # 2.  LLM CLIENT  (shared, instantiated once at module load)
 # ---------------------------------------------------------------------------
 
-# ChatOpenAI automatically uses the OPENAI_API_KEY env var if set; we pass it
-# explicitly from settings to remain consistent with the rest of the project.
+# On corporate networks, a TLS-intercepting proxy causes httpx to raise
+# "Connection error." when verifying api.openai.com's certificate chain.
+# We share a single async client with SSL verification disabled across all
+# ChatOpenAI instances so every LLM call goes through the same transport.
+_http_client = httpx.AsyncClient(verify=False)
+
 # Primary LLM used for conversation nodes.
 # Do NOT pass `streaming=True` in the constructor — it is deprecated in
 # langchain-openai >= 0.1.x.  Streaming is activated per-call via .astream().
 _llm = ChatOpenAI(
     model=settings.AI_MODEL or "gpt-4o-mini",
-    # Wrap in SecretStr: ChatOpenAI's `api_key` param is typed as
-    # `SecretStr | Callable | None`, not plain `str`.
     api_key=SecretStr(settings.OPENAI_API_KEY) if settings.OPENAI_API_KEY else None,
     temperature=0,
+    http_async_client=_http_client,
 )
 
 # Dedicated structured-output chain for the extractor node.
@@ -104,7 +120,28 @@ _llm_structured = ChatOpenAI(
     model=settings.AI_MODEL or "gpt-4o-mini",
     api_key=SecretStr(settings.OPENAI_API_KEY) if settings.OPENAI_API_KEY else None,
     temperature=0,
+    http_async_client=_http_client,
 ).with_structured_output(SearchFilters)
+
+_llm_agent_structured = ChatOpenAI(
+    model=settings.AI_MODEL or "gpt-4o-mini",
+    api_key=SecretStr(settings.OPENAI_API_KEY) if settings.OPENAI_API_KEY else None,
+    temperature=0,
+    http_async_client=_http_client,
+).with_structured_output(SearchNextGraph)
+
+tavily_client = TavilyClient(settings.TAVILY_API_KEY)
+
+@tool
+def web_search(query: str) -> str:
+    """Search the web for up-to-date information, pricing, salaries, and tech trends."""
+    return str(tavily_client.search(query, max_results=3))
+
+consultant_agent = create_agent(
+    _llm,
+    tools=[web_search],
+    system_prompt=CONSULTANT_NODE_PROMPT
+)
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +284,44 @@ async def extractor_node(state: AgentState) -> dict:
         "missing_fields": extracted.missing_fields,
     }
 
+
+# Create superviser_node
+async def supervisor_node(state: SupervisorState):
+    messages_for_llm: list[BaseMessage] = [
+        SystemMessage(content=SUPERVISOR_SEARCH_NODE_PROMPT),
+        *state["messages"],
+    ]
+
+    try:
+        raw = await _llm_agent_structured.ainvoke(messages_for_llm)
+        data = raw.next_agent if isinstance(raw, SearchNextGraph) else "FINISH"
+    except Exception as e:
+        logger.error(f"[supervisor_node] Routing failed, defaulting to FINISH: {e}")
+        data = "FINISH"
+
+    return {
+        "next_agent": data
+    }
+
+
+async def consultant_node(state: SupervisorState):
+    """
+    Acts as a software development consultant with web search capability.
+    Provides advice, architectures, estimations, etc.
+    """
+    logger.info("[consultant_node] Invoking React sub-agent for consultation ...")
+    
+    # We invoke the sub-agent with the conversation history.
+    # create_react_agent handles the state_modifier (SystemMessage) automatically.
+    result = await consultant_agent.ainvoke({"messages": state["messages"]})
+    
+    # The sub-agent returns the full messages array, which might include internal ToolMessages.
+    # We only extract the final AIMessage to append back to the main graph's state
+    # to keep the master history clean without exposing internal search traces to the user.
+    final_message = result["messages"][-1]
+    
+    updated_messages = list(state["messages"]) + [final_message]
+    return {"messages": updated_messages}
 
 def router(state: AgentState) -> Literal["ask_human_node", "search_db_node"]:
     """
@@ -462,11 +537,13 @@ async def generator_node(state: AgentState) -> dict:
     }
 
 
+
+
 # ---------------------------------------------------------------------------
 # 5.  GRAPH ASSEMBLY & COMPILATION
 # ---------------------------------------------------------------------------
 
-def build_search_agent():
+def build_search_subgraph():
     """
     Assembles and compiles the LangGraph StateGraph.
 
@@ -491,8 +568,7 @@ def build_search_agent():
     Returns the compiled graph (a LangGraph CompiledStateGraph).
     """
 
-    db_client = MongoClient(settings.MONGODB_URL)
-    checkpointer = MongoDBSaver(client=db_client, db_name=settings.MONGODB_DB)
+
 
     # -- Step 1: Create the StateGraph, declaring AgentState as the schema --
     # pyrefly: ignore [bad-specialization]
@@ -534,13 +610,51 @@ def build_search_agent():
 
     # -- Step 4: Compile the graph -------------------------------------------
     # compile() validates the graph structure and returns a runnable object.
-    compiled_graph = graph_builder.compile(checkpointer=checkpointer)
-    logger.info("[build_search_agent] Graph compiled successfully.")
+    compiled_graph = graph_builder.compile()
+    logger.info("[build_search_subgraph] Graph compiled successfully.")
     return compiled_graph
 
 
+# Singleton compiled subgraph
+search_agent = build_search_subgraph()
+
+def build_root_graph():
+    """
+    Assembles the multi-agent supervisor graph.
+    """
+    db_client = MongoClient(settings.MONGODB_URL)
+    checkpointer = MongoDBSaver(client=db_client, db_name=settings.MONGODB_DB)
+
+    # pyrefly: ignore [bad-specialization]
+    root_graph_builder = StateGraph(SupervisorState)
+    root_graph_builder.add_node("supervisor_node", supervisor_node)
+    
+    # Add our worker nodes
+    root_graph_builder.add_node("consultant", consultant_node)
+    root_graph_builder.add_node("search_agent", search_agent)
+
+    # Route at start to the supervisor
+    root_graph_builder.add_edge(START, "supervisor_node")
+
+    # The supervisor decides where to go next based on its LLM output
+    root_graph_builder.add_conditional_edges(
+        "supervisor_node",
+        lambda state: state.get("next_agent", "FINISH"),
+        {
+            "consultant": "consultant",
+            "search_agent": "search_agent",
+            "FINISH": END,
+        },
+    )
+
+    # After a worker finishes its task, the agent completes the turn to yield to the user.
+    root_graph_builder.add_edge("consultant", END)
+    root_graph_builder.add_edge("search_agent", END)
+
+    return root_graph_builder.compile(checkpointer=checkpointer)
+
 # Singleton compiled graph — import this instance from the API layer
-search_agent = build_search_agent()
+root_agent = build_root_graph()
 
 
 # ---------------------------------------------------------------------------
@@ -572,7 +686,7 @@ async def run_agent_turn(
         "messages": [HumanMessage(content=user_message)]
     }
 
-    final_state = await search_agent.ainvoke(new_input, config=thread_config)
+    final_state = await root_agent.ainvoke(new_input, config=thread_config)
 
     # Extract the last AI message as the "reply" for the API layer.
     # Guard against list-typed `.content` (same issue as in ask_human_node).

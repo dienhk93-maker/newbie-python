@@ -9,7 +9,7 @@ from app.services.openai_service import OpenAIService
 from app.services.qdrant_service import QdrantService
 from app.services.profile_service import ProfileService
 from langchain_core.messages import HumanMessage, AIMessage
-from app.services.agent_graph import search_agent
+from app.services.agent_graph import root_agent
 
 router = APIRouter(
     prefix="/ai-search",
@@ -77,7 +77,7 @@ async def chat_stream(
     }
 
     async def event_generator():
-        async for event in search_agent.astream_events(new_input, config=config, version="v2"):
+        async for event in root_agent.astream_events(new_input, config=config, version="v2"):
             if event["event"] == "on_chain_end" and event.get("name") == "search_db_node":
                 node_output = event.get("data", {}).get("output", {})
                 results = node_output.get("results", [])
@@ -88,7 +88,7 @@ async def chat_stream(
 
             if event["event"] == "on_chat_model_stream":
                 node_name = event.get("metadata", {}).get("langgraph_node")
-                if node_name in ["generator_node", "ask_human_node"]:
+                if node_name in ["generator_node", "ask_human_node", "consultant", "consultant_node", "agent", "model"]:
                     chunk = event["data"]["chunk"].content
                     if isinstance(chunk, str) and chunk:
                         safe_chunk = chunk.replace("\n", "\\n")
@@ -107,7 +107,7 @@ async def get_chat_history(
     config = {"configurable": {"thread_id": thread_id}}
     
     # Sử dụng aget_state vì checkpointer là AsyncMongoDBSaver
-    state_snapshot = await search_agent.aget_state(config)
+    state_snapshot = await root_agent.aget_state(config)
     
     messages_for_ui = []
     if state_snapshot and getattr(state_snapshot, "values", None):

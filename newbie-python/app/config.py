@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     MINIO_BUCKET: str | None = None
     MINIO_SECURE: bool = False
 
+    #Tavily
+    TAVILY_API_KEY: str | None = None
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
