@@ -27,3 +27,5 @@ class AISearchRequest(BaseModel):
     thread_id: Optional[str] = Field(default=None, description="Session ID for LangGraph Checkpointer")
 
 
+class SearchNextGraph(BaseModel):
+    next_agent: Literal["consultant", "search_agent", "FINISH"]
