@@ -21,6 +21,8 @@ export const useChat = () => {
     const [activeThreadId, setActiveThreadId] = useState<string>(getOrCreateThreadId());
     
     const abortControllerRef = useRef<AbortController | null>(null);
+    // Ref to cancel in-flight history fetch when token changes mid-flight (race condition fix)
+    const historyAbortControllerRef = useRef<AbortController | null>(null);
 
     // Fetch Sidebar Conversations
     useEffect(() => {
@@ -55,43 +57,74 @@ export const useChat = () => {
 
     // Fetch Chat History
     useEffect(() => {
+        if (!token) return;
+
+        // Cancel any in-flight history request to prevent race condition:
+        // When an expired token triggers refreshToken() → setTokens() → token state change
+        // → this effect re-runs WHILE the previous fetch is still doing its 401-retry.
+        // Without this abort, two fetches run in parallel and the second one resets messages to [].
+        if (historyAbortControllerRef.current) {
+            historyAbortControllerRef.current.abort();
+        }
+        const abortController = new AbortController();
+        historyAbortControllerRef.current = abortController;
+        const signal = abortController.signal;
+
         const fetchHistory = async (authToken: string) => {
             setIsLoadingHistory(true);
             try {
                 let res = await fetch(`http://localhost:8000/api/v1/ai-search/chat/${activeThreadId}/history`, {
-                    headers: { "Authorization": `Bearer ${authToken}` }
+                    headers: { "Authorization": `Bearer ${authToken}` },
+                    signal,
                 });
 
                 if (res.status === 401) {
+                    if (signal.aborted) return; // Another fetch took over
                     const newToken = await refreshToken();
-                    if (newToken) {
+                    if (newToken && !signal.aborted) {
                         res = await fetch(`http://localhost:8000/api/v1/ai-search/chat/${activeThreadId}/history`, {
-                            headers: { "Authorization": `Bearer ${newToken}` }
+                            headers: { "Authorization": `Bearer ${newToken}` },
+                            signal,
                         });
+                    } else {
+                        return; // This fetch was superseded
                     }
                 }
 
+                if (signal.aborted) return;
+
                 if (res.ok) {
                     const data = await res.json();
-                    if (data.history && data.history.length > 0) {
-                        const historyMessages: MessageType[] = data.history.map((h: any) => ({
-                            id: generateId(),
-                            role: h.role,
-                            content: h.content,
-                            agencies: h.agencies, // Lấy mảng agencies được BE trích xuất từ metadata
-                        }));
-                        setMessages(historyMessages);
-                    } else {
-                        setMessages([]); // Reset to empty if new chat
+                    if (!signal.aborted) {
+                        if (data.history && data.history.length > 0) {
+                            const historyMessages: MessageType[] = data.history.map((h: any) => ({
+                                id: generateId(),
+                                role: h.role,
+                                content: h.content,
+                                agencies: h.agencies,
+                            }));
+                            setMessages(historyMessages);
+                        } else {
+                            setMessages([]); // Reset to empty if new chat
+                        }
                     }
                 }
-            } catch (err) {
-                console.error("Failed to fetch chat history:", err);
+            } catch (err: any) {
+                if (err.name !== 'AbortError') {
+                    console.error("Failed to fetch chat history:", err);
+                }
             } finally {
-                setIsLoadingHistory(false);
+                if (!signal.aborted) {
+                    setIsLoadingHistory(false);
+                }
             }
         };
-        if (token) fetchHistory(token);
+
+        fetchHistory(token);
+
+        return () => {
+            abortController.abort(); // Cleanup on unmount or dependency change
+        };
     }, [token, activeThreadId, refreshToken]);
 
     const selectConversation = useCallback((threadId: string) => {
@@ -257,7 +290,7 @@ export const useChat = () => {
         } finally {
             setIsStreaming(false);
         }
-    }, [messages, isStreaming, token, logout]);
+    }, [isStreaming, token, activeThreadId, refreshToken]);
 
     const stopStreaming = useCallback(() => {
         if (abortControllerRef.current) {
