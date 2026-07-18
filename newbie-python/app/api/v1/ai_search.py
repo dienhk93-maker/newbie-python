@@ -10,6 +10,9 @@ from app.services.qdrant_service import QdrantService
 from app.services.profile_service import ProfileService
 from langchain_core.messages import HumanMessage, AIMessage
 from app.services.agent_graph import root_agent
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/ai-search",
@@ -88,12 +91,22 @@ async def chat_stream(
 
             if event["event"] == "on_chat_model_stream":
                 node_name = event.get("metadata", {}).get("langgraph_node")
+                chunk = event["data"]["chunk"]
+                # Skip tool_call chunks (they have no text, only tool_calls)
+                if chunk.tool_call_chunks:
+                    logger.debug("[stream] node=%s: tool_call_chunk detected (skipping text stream)", node_name)
+                    continue
                 if node_name in ["generator_node", "ask_human_node", "consultant", "consultant_node", "agent", "model"]:
-                    chunk = event["data"]["chunk"].content
-                    if isinstance(chunk, str) and chunk:
-                        safe_chunk = chunk.replace("\n", "\\n")
+                    text = chunk.content
+                    if isinstance(text, str) and text:
+                        safe_chunk = text.replace("\n", "\\n")
                         yield f"data: {safe_chunk}\n\n"
             
+            # Log tool execution events for debugging
+            if event["event"] == "on_tool_end":
+                tool_name = event.get("name", "")
+                tool_output = event.get("data", {}).get("output", "")
+                logger.info("[stream] Tool '%s' executed → output: %s", tool_name, str(tool_output)[:300])
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 

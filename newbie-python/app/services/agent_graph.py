@@ -15,34 +15,33 @@ Graph topology:
                                     ↘ search_db_node  → generator_node → END
 """
 
+from app.services.tools_agent import get_lunar_date
+from langgraph.graph import add_messages
+from typing import Annotated
 from app.schemas.ai_search import SearchNextGraph
-from app.constants.prompts import SUPERVISOR_SEARCH_NODE_PROMPT
+from app.constants.prompts import SUPERVISOR_SEARCH_NODE_PROMPT,AGENCY_EXTRACTION_PROMPT, CONSULTANT_NODE_PROMPT
 from pymongo import MongoClient
-from app.database import connection
-import asyncio
 import json
 import logging
-from typing import Any, Literal, Optional, cast
+from typing import Any, Literal, Optional
 from typing_extensions import TypedDict
 
 from pydantic import SecretStr
 from langchain_core.runnables import RunnableConfig
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, BaseMessage
-from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END, START
 from langchain.agents import create_agent
 
 from app.config import settings
-from app.constants.prompts import AGENCY_EXTRACTION_PROMPT, CONSULTANT_NODE_PROMPT
 from app.schemas.ai_search import SearchFilters
 from app.utils.common.normalize import normalize_tech_list
 from app.utils.common.helpper import build_numeric_range_filter
 from qdrant_client import models
 from langgraph.checkpoint.mongodb import MongoDBSaver
-from tavily import TavilyClient
 import httpx
+from app.services.tools_agent import tavily_tools
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +75,10 @@ class AgentState(TypedDict):
     Shared across all nodes:
       - messages        : Full conversation history (LangChain BaseMessage list).
     """
-    messages: list[BaseMessage]
+    messages: Annotated[
+        list[BaseMessage],
+        add_messages
+    ]
     is_sufficient: bool
     budget: Optional[NumericFilter]
     team_size: Optional[NumericFilter]
@@ -87,7 +89,10 @@ class AgentState(TypedDict):
     results: list[dict]
 
 class SupervisorState(TypedDict):
-    messages: list[BaseMessage]
+    messages: Annotated[
+        list[BaseMessage],
+        add_messages
+    ]
     next_agent: Literal["consultant", "search_agent", "FINISH"]
     results: list[dict]
 
@@ -130,19 +135,11 @@ _llm_agent_structured = ChatOpenAI(
     http_async_client=_http_client,
 ).with_structured_output(SearchNextGraph)
 
-tavily_client = TavilyClient(settings.TAVILY_API_KEY)
-
-@tool
-def web_search(query: str) -> str:
-    """Search the web for up-to-date information, pricing, salaries, and tech trends."""
-    return str(tavily_client.search(query, max_results=3))
-
 consultant_agent = create_agent(
     _llm,
-    tools=[web_search],
+    tools=[ get_lunar_date, tavily_tools],
     system_prompt=CONSULTANT_NODE_PROMPT
 )
-
 
 # ---------------------------------------------------------------------------
 # 3.  REAL DB SEARCH HELPER
@@ -310,11 +307,17 @@ async def consultant_node(state: SupervisorState):
     Provides advice, architectures, estimations, etc.
     """
     logger.info("[consultant_node] Invoking React sub-agent for consultation ...")
+    logger.info("[consultant_node] Last user message: %s", state["messages"][-1].content if state["messages"] else "(empty)")
     
     # We invoke the sub-agent with the conversation history.
     # create_react_agent handles the state_modifier (SystemMessage) automatically.
     result = await consultant_agent.ainvoke({"messages": state["messages"]})
     
+    # Log the full message chain to see if the tool was actually called
+    for i, msg in enumerate(result["messages"]):
+        logger.info("[consultant_node] result.messages[%d] type=%s content=%s",
+                    i, type(msg).__name__, str(msg.content)[:200])
+
     # The sub-agent returns the full messages array, which might include internal ToolMessages.
     # We only extract the final AIMessage to append back to the main graph's state
     # to keep the master history clean without exposing internal search traces to the user.
