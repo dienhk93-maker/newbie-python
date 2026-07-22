@@ -19,6 +19,14 @@ class PaginationParams(BaseModel):
     def skip(self) -> int:
         return (self.page - 1) * self.item_page
 
+class ConversationParams(BaseModel):
+    page: int = Field(default=1, ge=1)
+    item_page: int = Field(default=10, ge=1, le=100)
+
+    @property
+    def skip(self) -> int:
+        return (self.page - 1) * self.item_page
+
 
 class PaginatedResponse(BaseModel, Generic[T]):
     docs: list[T]
@@ -43,6 +51,15 @@ def get_pagination_params(
         search_key=search_key,
     )
 
+def get_conversation_params(
+    page: int = Query(default=1, ge=1),
+    item_page: int = Query(default=10, ge=1, le=100),
+) -> ConversationParams:
+    return ConversationParams(
+        page=page,
+        item_page=item_page,
+    )
+
 
 def calculate_total_page(total: int, item_page: int) -> int:
     if total <= 0:
@@ -55,7 +72,7 @@ def build_paginated_response(
     *,
     docs: list[T],
     total: int,
-    pagination: PaginationParams,
+    pagination: PaginationParams | ConversationParams,
 ) -> PaginatedResponse[T]:
     return PaginatedResponse[T](
         docs=docs,

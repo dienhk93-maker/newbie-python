@@ -20,4 +20,5 @@ export interface MessageType {
     isStreaming?: boolean;
     isError?: boolean;
     agencies?: Agency[];
+    statuses?: string[];
 }

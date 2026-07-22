@@ -1,3 +1,4 @@
+from app.services.conversation_service import ConversationService
 from app.services.profile_service import ProfileService
 from minio import Minio
 from app.services.storage_service import StorageService
@@ -42,6 +43,10 @@ class ServiceProvider(Provider):
     @provide
     def get_profile_service(self, user_service: UserService, storage_service: StorageService, AiSearchService: AiSearchService) -> ProfileService:
         return ProfileService(user_service, storage_service, AiSearchService)
+
+    @provide
+    def get_conversation_service(self) -> ConversationService:
+        return ConversationService()
 
 
 # Qdrant Provider

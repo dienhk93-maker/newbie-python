@@ -18,42 +18,71 @@ export const useChat = () => {
     const [isStreaming, setIsStreaming] = useState<boolean>(false);
     const [isLoadingHistory, setIsLoadingHistory] = useState<boolean>(true);
     const [conversations, setConversations] = useState<any[]>([]);
+    const [convPage, setConvPage] = useState<number>(1);
+    const [hasMoreConversations, setHasMoreConversations] = useState<boolean>(true);
+    const [isLoadingMoreConversations, setIsLoadingMoreConversations] = useState<boolean>(false);
     const [activeThreadId, setActiveThreadId] = useState<string>(getOrCreateThreadId());
     
     const abortControllerRef = useRef<AbortController | null>(null);
     // Ref to cancel in-flight history fetch when token changes mid-flight (race condition fix)
     const historyAbortControllerRef = useRef<AbortController | null>(null);
 
-    // Fetch Sidebar Conversations
-    useEffect(() => {
-        const fetchConversations = async (authToken: string) => {
-            try {
-                let res = await fetch(`http://localhost:8000/api/v1/ai-search/conversations`, {
+    // Fetch Sidebar Conversations (paginated)
+    const fetchConversations = useCallback(async (pageToFetch: number = 1, isAppend: boolean = false) => {
+        if (!token) return;
+        if (isAppend) {
+            setIsLoadingMoreConversations(true);
+        }
+
+        try {
+            const makeRequest = async (authToken: string) => {
+                return fetch(`http://localhost:8000/api/v1/conversations?page=${pageToFetch}&item_page=10`, {
                     headers: { "Authorization": `Bearer ${authToken}` }
                 });
+            };
 
-                if (res.status === 401) {
-                    const newToken = await refreshToken();
-                    if (newToken) {
-                        res = await fetch(`http://localhost:8000/api/v1/ai-search/conversations`, {
-                            headers: { "Authorization": `Bearer ${newToken}` }
-                        });
-                    }
+            let res = await makeRequest(token);
+            if (res.status === 401) {
+                const newToken = await refreshToken();
+                if (newToken) {
+                    res = await makeRequest(newToken);
                 }
-
-                if (res.ok) {
-                    const data = await res.json();
-                    setConversations(data.conversations || []);
-                }
-            } catch (err) {
-                console.error("Failed to fetch conversations:", err);
             }
-        };
-        // Fetch only when NOT streaming, meaning a turn just ended (or just mounted)
-        if (token && !isStreaming) {
-            fetchConversations(token);
+
+            if (res.ok) {
+                const data = await res.json();
+                const newDocs = data.docs || [];
+                if (isAppend) {
+                    setConversations(prev => {
+                        const existingIds = new Set(prev.map(c => c.thread_id));
+                        const filtered = newDocs.filter((c: any) => !existingIds.has(c.thread_id));
+                        return [...prev, ...filtered];
+                    });
+                } else {
+                    setConversations(newDocs);
+                }
+                setConvPage(data.page || pageToFetch);
+                setHasMoreConversations((data.page || pageToFetch) < (data.total_page || 1));
+            }
+        } catch (err) {
+            console.error("Failed to fetch conversations:", err);
+        } finally {
+            setIsLoadingMoreConversations(false);
         }
-    }, [token, isStreaming, refreshToken]);
+    }, [token, refreshToken]);
+
+    const loadMoreConversations = useCallback(() => {
+        if (hasMoreConversations && !isLoadingMoreConversations) {
+            fetchConversations(convPage + 1, true);
+        }
+    }, [hasMoreConversations, isLoadingMoreConversations, convPage, fetchConversations]);
+
+    // Initial fetch or refresh when streaming finishes
+    useEffect(() => {
+        if (token && !isStreaming) {
+            fetchConversations(1, false);
+        }
+    }, [token, isStreaming, fetchConversations]);
 
     // Fetch Chat History
     useEffect(() => {
@@ -238,7 +267,24 @@ export const useChat = () => {
                     const rawData = dataLines.join('');
                     if (!rawData) continue;
 
-                    if (eventType === 'search_results') {
+                    if (eventType === 'status_update') {
+                        try {
+                            const { status } = JSON.parse(rawData);
+                            setMessages(prev =>
+                                prev.map(msg => {
+                                    if (msg.id === aiMsgId) {
+                                        const curStatuses = msg.statuses || [];
+                                        if (!curStatuses.includes(status)) {
+                                            return { ...msg, statuses: [...curStatuses, status] };
+                                        }
+                                    }
+                                    return msg;
+                                })
+                            );
+                        } catch (e) {
+                            console.error('[useChat] Failed to parse status:', e);
+                        }
+                    } else if (eventType === 'search_results') {
                         // Parse agency cards JSON → attach to AI message
                         try {
                             const agencies = JSON.parse(rawData);
@@ -317,6 +363,9 @@ export const useChat = () => {
         conversations, 
         activeThreadId, 
         selectConversation, 
-        createNewChat 
+        createNewChat,
+        hasMoreConversations,
+        isLoadingMoreConversations,
+        loadMoreConversations
     };
 };

@@ -101,7 +101,35 @@ async def chat_stream(
                     if isinstance(text, str) and text:
                         safe_chunk = text.replace("\n", "\\n")
                         yield f"data: {safe_chunk}\n\n"
+
+            if event["event"] == "on_chain_start":
+                node_name = event.get("name")
+                status_messages = {
+                    "supervisor_node": "Analyzing request intent...",
+                    "extractor_node": "Extracting search parameters...",
+                    "ask_human_node": "Formatting clarification question...",
+                    "search_db_node": "Searching database for agencies...",
+                    "generator_node": "Generating final summary...",
+                    "consultant": "Consulting with expert agent (this might take a bit)..."
+                }
+                if node_name in status_messages:
+                    msg = status_messages[node_name]
+                    import json
+                    json_data = json.dumps({"status": msg}, ensure_ascii=False)
+                    yield f"event: status_update\ndata: {json_data}\n\n"
             
+            if event["event"] == "on_tool_start":
+                tool_name = event.get("name", "")
+                if tool_name:
+                    tool_msg = f"Calling tool: {tool_name}..."
+                    if "tavily" in tool_name.lower() or "search" in tool_name.lower():
+                        tool_msg = "Searching the internet..."
+                    elif "lunar" in tool_name.lower():
+                        tool_msg = "Checking the lunar calendar..."
+                    import json
+                    json_data = json.dumps({"status": tool_msg}, ensure_ascii=False)
+                    yield f"event: status_update\ndata: {json_data}\n\n"
+
             # Log tool execution events for debugging
             if event["event"] == "on_tool_end":
                 tool_name = event.get("name", "")

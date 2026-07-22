@@ -22,13 +22,22 @@ export const ChatView: React.FC = () => {
     conversations,
     activeThreadId,
     selectConversation,
-    createNewChat
+    createNewChat,
+    isLoadingMoreConversations,
+    loadMoreConversations
   } = useChat();
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  const handleSidebarScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
+    if (scrollHeight - scrollTop - clientHeight < 40) {
+      loadMoreConversations();
+    }
+  };
 
   return (
     <div className="flex h-screen w-full bg-[#0a0c10] text-white overflow-hidden">
@@ -60,8 +69,12 @@ export const ChatView: React.FC = () => {
           </button>
         </div>
         
-        {/* Conversations List */}
-        <div className="flex-1 overflow-y-auto w-full p-2 space-y-0.5" style={{ scrollbarWidth: 'none' }}>
+        {/* Conversations List with Infinite Scroll */}
+        <div 
+          className="flex-1 overflow-y-auto w-full p-2 space-y-0.5" 
+          style={{ scrollbarWidth: 'none' }}
+          onScroll={handleSidebarScroll}
+        >
           {conversations.map((conv) => (
             <button
               key={conv.thread_id}
@@ -81,6 +94,11 @@ export const ChatView: React.FC = () => {
               </div>
             </button>
           ))}
+          {isLoadingMoreConversations && (
+            <div className="flex items-center justify-center py-2 text-indigo-400">
+              <div className="w-4 h-4 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin"></div>
+            </div>
+          )}
         </div>
 
         {/* User section */}

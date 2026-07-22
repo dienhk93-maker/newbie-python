@@ -10,7 +10,24 @@ class OpenAIService:
             # We allow initialization without key for setup, but it will fail on call
             self.client = None
         else:
-            self.client = AsyncOpenAI(api_key=api_key)
+            import httpx
+            import os
+            import ssl
+            import certifi
+
+            BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+            SSL_CERT_PATH = os.path.join(BASE_DIR, "lgcns.pem")
+            
+            if os.path.exists(SSL_CERT_PATH):
+                VERIFY_SSL = ssl.create_default_context(cafile=certifi.where())
+                VERIFY_SSL.load_verify_locations(cafile=SSL_CERT_PATH)
+            else:
+                VERIFY_SSL = True
+
+            self.client = AsyncOpenAI(
+                api_key=api_key,
+                http_client=httpx.AsyncClient(verify=VERIFY_SSL)
+            )
 
     async def extract_filters(self, prompt: str) -> SearchFilters:
         if not self.client:

@@ -86,6 +86,7 @@ class AgentState(TypedDict):
     tech_stack: list[str]
     semantic_query: str
     missing_fields: list[str]
+    status: Optional[str]
     results: list[dict]
 
 class SupervisorState(TypedDict):
@@ -94,6 +95,7 @@ class SupervisorState(TypedDict):
         add_messages
     ]
     next_agent: Literal["consultant", "search_agent", "FINISH"]
+    status: Optional[str]
     results: list[dict]
 
 
@@ -102,42 +104,82 @@ class SupervisorState(TypedDict):
 # 2.  LLM CLIENT  (shared, instantiated once at module load)
 # ---------------------------------------------------------------------------
 
-# On corporate networks, a TLS-intercepting proxy causes httpx to raise
-# "Connection error." when verifying api.openai.com's certificate chain.
-# We share a single async client with SSL verification disabled across all
-# ChatOpenAI instances so every LLM call goes through the same transport.
-_http_client = httpx.AsyncClient(verify=False)
+# On corporate networks, a TLS-intercepting proxy causes OpenAI SDK to raise
+# "Connection error." — bypass SSL verification for local dev.
+# NOTE: Do NOT share a single httpx.AsyncClient across multiple ChatOpenAI
+# instances — the SDK may close the underlying transport after use, causing
+# subsequent requests to fail with APIConnectionError. Instead, use a factory.
+import os
+import ssl
+import certifi
+
+# Custom corporate TLS proxy certificate located in the project root.
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+SSL_CERT_PATH = os.path.join(BASE_DIR, "lgcns.pem")
+
+# Auto-detect corporate network. If the cert exists, we MUST load BOTH the 
+# standard Internet CAs (from certifi) AND the proxy custom cert.
+if os.path.exists(SSL_CERT_PATH):
+    VERIFY_SSL = ssl.create_default_context(cafile=certifi.where())
+    VERIFY_SSL.load_verify_locations(cafile=SSL_CERT_PATH)
+else:
+    VERIFY_SSL = True
+
+
+def _make_http_client() -> httpx.AsyncClient:
+    """Return a new httpx.AsyncClient configured for the current environment.
+
+    Key settings:
+    - verify: Auto-switches between corporate CA bundle and standard TLS verification.
+    - limits: generous pool size; keepalive_expiry=30 keeps connections open
+      so the SDK never hits a "connection closed" error between back-to-back requests.
+    - timeout: 60 s overall, 30 s connect — enough for cold-start GPT calls.
+    """
+    return httpx.AsyncClient(
+        verify=VERIFY_SSL,
+
+        timeout=httpx.Timeout(60.0, connect=30.0),
+        limits=httpx.Limits(
+            max_connections=20,
+            max_keepalive_connections=10,
+            keepalive_expiry=30,   # seconds; None = keep forever
+        ),
+    )
+
+
+# Shared client used by the web_search tool (Tavily calls).
+# This client lives outside the OpenAI SDK so its lifecycle is managed here.
+_async_http_client = _make_http_client()
+
 
 # Primary LLM used for conversation nodes.
+# Each ChatOpenAI instance gets its OWN dedicated httpx.AsyncClient so the
+# OpenAI SDK cannot close the transport used by other nodes.
 # Do NOT pass `streaming=True` in the constructor — it is deprecated in
 # langchain-openai >= 0.1.x.  Streaming is activated per-call via .astream().
-_llm = ChatOpenAI(
+_llm_agent = ChatOpenAI(
     model=settings.AI_MODEL or "gpt-4o-mini",
     api_key=SecretStr(settings.OPENAI_API_KEY) if settings.OPENAI_API_KEY else None,
     temperature=0,
-    http_async_client=_http_client,
+    http_async_client=_make_http_client(),
 )
+
 
 # Dedicated structured-output chain for the extractor node.
 # `.with_structured_output()` wraps the model and forces JSON conforming to
 # the SearchFilters Pydantic schema on every call.
-_llm_structured = ChatOpenAI(
-    model=settings.AI_MODEL or "gpt-4o-mini",
-    api_key=SecretStr(settings.OPENAI_API_KEY) if settings.OPENAI_API_KEY else None,
-    temperature=0,
-    http_async_client=_http_client,
-).with_structured_output(SearchFilters)
+_llm_structured = _llm_agent.with_structured_output(
+    SearchFilters
+)
 
-_llm_agent_structured = ChatOpenAI(
-    model=settings.AI_MODEL or "gpt-4o-mini",
-    api_key=SecretStr(settings.OPENAI_API_KEY) if settings.OPENAI_API_KEY else None,
-    temperature=0,
-    http_async_client=_http_client,
-).with_structured_output(SearchNextGraph)
+# Dedicated structured-output chain for the supervisor node.
+_llm_agent_structured = _llm_agent.with_structured_output(
+    SearchNextGraph
+)
 
 consultant_agent = create_agent(
-    _llm,
-    tools=[ get_lunar_date, tavily_tools],
+    _llm_agent,
+    tools=[get_lunar_date, tavily_tools],
     system_prompt=CONSULTANT_NODE_PROMPT
 )
 
@@ -279,6 +321,7 @@ async def extractor_node(state: AgentState) -> dict:
         "tech_stack": extracted.tech_stack,
         "semantic_query": extracted.semantic_query,
         "missing_fields": extracted.missing_fields,
+        "status": "Extracted search parameters"
     }
 
 
@@ -293,11 +336,16 @@ async def supervisor_node(state: SupervisorState):
         raw = await _llm_agent_structured.ainvoke(messages_for_llm)
         data = raw.next_agent if isinstance(raw, SearchNextGraph) else "FINISH"
     except Exception as e:
+        import traceback
         logger.error(f"[supervisor_node] Routing failed, defaulting to FINISH: {e}")
+        logger.error(f"[supervisor_node] Full traceback:\n{traceback.format_exc()}")
+        logger.error(f"[supervisor_node] Exception type: {type(e).__name__}")
+        logger.error(f"[supervisor_node] _http_client verify setting: {_async_http_client}")
         data = "FINISH"
 
     return {
-        "next_agent": data
+        "next_agent": data,
+        "status": f"Routing to {data}"
     }
 
 
@@ -324,7 +372,10 @@ async def consultant_node(state: SupervisorState):
     final_message = result["messages"][-1]
     
     updated_messages = list(state["messages"]) + [final_message]
-    return {"messages": updated_messages}
+    return {
+        "messages": updated_messages,
+        "status": "Consultation complete"
+    }
 
 def router(state: AgentState) -> Literal["ask_human_node", "search_db_node"]:
     """
@@ -373,7 +424,7 @@ async def ask_human_node(state: AgentState) -> dict:
     ]
 
     # Use ainvoke for a complete response (not streaming).
-    response = await _llm.ainvoke(messages_for_llm)
+    response = await _llm_agent.ainvoke(messages_for_llm)
 
     # `AIMessage.content` is typed as `str | list[str | dict]` in LangChain.
     # Guard against the list case (tool-call responses, multi-modal models, etc.)
@@ -392,7 +443,10 @@ async def ask_human_node(state: AgentState) -> dict:
 
     # Append the AI's follow-up question to the conversation history
     updated_messages = list(state["messages"]) + [AIMessage(content=follow_up_text)]
-    return {"messages": updated_messages}
+    return {
+        "messages": updated_messages,
+        "status": "Asked for clarification"
+    }
 
 
 async def search_db_node(state: AgentState, config: RunnableConfig) -> dict:
@@ -471,7 +525,10 @@ async def search_db_node(state: AgentState, config: RunnableConfig) -> dict:
     formatted.sort(key=lambda x: x["score"], reverse=True)
 
     logger.info("[search_db_node] Returning %d hydrated results", len(formatted))
-    return {"results": formatted}
+    return {
+        "results": formatted,
+        "status": f"Found {len(formatted)} agencies"
+    }
 
 
 async def generator_node(state: AgentState) -> dict:
@@ -515,7 +572,7 @@ async def generator_node(state: AgentState) -> dict:
     # Collect all streamed chunks into a single string.
     # Each chunk's `.content` can be `str | list` — extract the string part only.
     full_response = ""
-    async for chunk in _llm.astream(messages_for_llm):
+    async for chunk in _llm_agent.astream(messages_for_llm):
         chunk_content = getattr(chunk, "content", "")
         if isinstance(chunk_content, str):
             full_response += chunk_content
@@ -537,6 +594,7 @@ async def generator_node(state: AgentState) -> dict:
     return {
         "messages": updated_messages,
         "results": results,      # keep results in state for the API layer to access
+        "status": "Generated final summary"
     }
 
 
