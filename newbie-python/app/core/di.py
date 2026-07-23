@@ -11,6 +11,8 @@ from app.config import Settings, settings
 from qdrant_client import AsyncQdrantClient
 from app.services.openai_service import OpenAIService
 from app.services.ai_search_service import AiSearchService
+from langgraph.checkpoint.mongodb import MongoDBSaver
+from pymongo import MongoClient
 
 #Service Provider
 class ServiceProvider(Provider):
@@ -45,8 +47,8 @@ class ServiceProvider(Provider):
         return ProfileService(user_service, storage_service, AiSearchService)
 
     @provide
-    def get_conversation_service(self) -> ConversationService:
-        return ConversationService()
+    def get_conversation_service(self, checkpointer: MongoDBSaver) -> ConversationService:
+        return ConversationService(checkpointer=checkpointer)
 
 
 # Qdrant Provider
@@ -77,6 +79,12 @@ class QdrantProvider(Provider):
             collection_name=settings.QDRANT_COLLECTION_NAME,
             embedding_size=settings.QDRANT_EMBEDDING_SIZE,
         )
+
+    @provide
+    def get_checkpointer(self, settings: Settings) -> MongoDBSaver:
+        """Provides a shared MongoDBSaver instance for LangGraph checkpoint cleanup."""
+        db_client = MongoClient(settings.MONGODB_URL)
+        return MongoDBSaver(client=db_client, db_name=settings.MONGODB_DB)
 
 
 class MinIOProvider(Provider):

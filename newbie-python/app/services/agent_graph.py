@@ -61,31 +61,38 @@ class AgentState(TypedDict):
     The shared state object that flows through every node in the graph.
 
     Fields updated by extractor_node:
-      - is_sufficient   : True when the LLM has enough info to run a search.
-      - budget          : Numeric filter for agency budget.
-      - team_size       : Numeric filter for team headcount.
-      - domain          : List of business/project domains (e.g. "fintech").
-      - tech_stack      : List of requested technologies (e.g. "React Native").
-      - semantic_query  : Rewritten query fed to the Qdrant vector search.
-      - missing_fields  : Names of fields still needed from the user.
+      - is_sufficient      : True when the LLM has enough info to run a search.
+      - confidence         : LLM confidence score [0.0, 1.0]. Enables soft-threshold
+                             routing: a high-confidence partial match can bypass the
+                             clarification branch even if some fields are missing.
+      - budget             : Numeric filter for agency budget.
+      - team_size          : Numeric filter for team headcount.
+      - domain             : List of business/project domains (e.g. "fintech").
+      - tech_stack         : List of requested technologies (e.g. "React Native").
+      - semantic_query     : Rewritten query fed to the Qdrant vector search.
+      - missing_fields     : Names of fields still needed from the user.
+      - follow_up_question : Pre-generated clarification question from the extractor.
+                             Reused directly by ask_human_node — avoids a second LLM call.
 
     Fields updated by search_db_node:
-      - results         : Raw list of matching agency dicts from DB.
+      - results            : Raw list of matching agency dicts from DB.
 
     Shared across all nodes:
-      - messages        : Full conversation history (LangChain BaseMessage list).
+      - messages           : Full conversation history (LangChain BaseMessage list).
     """
     messages: Annotated[
         list[BaseMessage],
         add_messages
     ]
     is_sufficient: bool
+    confidence: float
     budget: Optional[NumericFilter]
     team_size: Optional[NumericFilter]
     domain: list[str]
     tech_stack: list[str]
     semantic_query: str
     missing_fields: list[str]
+    follow_up_question: Optional[str]
     status: Optional[str]
     results: list[dict]
 
@@ -315,12 +322,15 @@ async def extractor_node(state: AgentState) -> dict:
 
     return {
         "is_sufficient": extracted.is_sufficient,
+        "confidence": extracted.confidence,
         "budget": budget_dict,
         "team_size": team_size_dict,
         "domain": extracted.domain,
         "tech_stack": extracted.tech_stack,
         "semantic_query": extracted.semantic_query,
         "missing_fields": extracted.missing_fields,
+        # Reuse the LLM-generated question in ask_human_node — no second LLM call needed.
+        "follow_up_question": extracted.follow_up_question,
         "status": "Extracted search parameters"
     }
 
@@ -370,81 +380,97 @@ async def consultant_node(state: SupervisorState):
     # We only extract the final AIMessage to append back to the main graph's state
     # to keep the master history clean without exposing internal search traces to the user.
     final_message = result["messages"][-1]
-    
-    updated_messages = list(state["messages"]) + [final_message]
+
+    # Return ONLY the new message — LangGraph's add_messages reducer merges it
+    # into the existing state automatically. Returning the full list would cause
+    # duplicates because add_messages appends on top of what's already stored.
     return {
-        "messages": updated_messages,
+        "messages": [final_message],
         "status": "Consultation complete"
     }
+
+# Confidence threshold below which we always ask for clarification,
+# even when is_sufficient is technically False.
+# 0.75 = at least domain + budget/tech_stack are present; team_size alone missing is OK.
+_CONFIDENCE_SOFT_THRESHOLD = 0.75
 
 def router(state: AgentState) -> Literal["ask_human_node", "search_db_node"]:
     """
     Conditional Edge – Router
     --------------------------
-    Reads the `is_sufficient` flag set by extractor_node and decides which
-    branch to take:
-      - False -> ask_human_node  (request more information from the user)
-      - True  -> search_db_node  (run the actual DB search)
+    Combines two signals from extractor_node:
+
+    1. is_sufficient (hard rule): all four fields provided → always search.
+    2. confidence (soft rule): LLM confidence >= 0.75 even with partial info
+       → proceed to search rather than frustrate the user with an extra question.
+       Example: domain + budget + tech_stack present, team_size missing →
+                confidence 0.8 → route to search_db_node anyway.
+
+    Only when both flags are False do we ask the user for more info.
     """
-    # Use direct key access — `is_sufficient` is always initialised in the
-    # initial_state dict, so KeyError is not a concern here.
     if state["is_sufficient"]:
         logger.info("[router] Sufficient info -> routing to search_db_node")
         return "search_db_node"
 
-    logger.info("[router] Insufficient info -> routing to ask_human_node")
+    confidence = state.get("confidence", 0.0)
+    if confidence >= _CONFIDENCE_SOFT_THRESHOLD:
+        logger.info(
+            "[router] Partial info but high confidence (%.2f >= %.2f) -> routing to search_db_node",
+            confidence, _CONFIDENCE_SOFT_THRESHOLD,
+        )
+        return "search_db_node"
+
+    logger.info("[router] Insufficient info (confidence=%.2f) -> routing to ask_human_node", confidence)
     return "ask_human_node"
 
 
 async def ask_human_node(state: AgentState) -> dict:
     """
-    Node 3 – Clarification Question Generator
-    -------------------------------------------
-    When the extracted information is insufficient, this node generates a
-    natural follow-up question targeting the specific missing fields.
-    The AI message is appended to the conversation history and the graph ends.
+    Node 3 – Clarification Question
+    ---------------------------------
+    Reuses the `follow_up_question` already generated by extractor_node
+    (stored in state) — no second LLM call needed.
+
+    Falls back to a generic prompt-based generation only if the field is
+    missing (e.g. extractor fallback path).
     """
     missing = state.get("missing_fields", [])
-    logger.info("[ask_human_node] Generating follow-up for missing fields: %s", missing)
+    follow_up_text = state.get("follow_up_question") or ""
 
-    # Build a targeted prompt so the LLM asks about exactly what's missing
-    missing_str = ", ".join(missing) if missing else "more details"
-    clarification_prompt = (
-        f"You are a helpful assistant for a software agency search platform. "
-        f"The user has not provided enough information to search yet. "
-        f"The following fields are missing or unclear: {missing_str}. "
-        f"Ask ONE short, friendly question in the same language as the user's last message "
-        f"to collect the missing information. Do not list the fields by name; "
-        f"incorporate them naturally into a single question."
-    )
-
-    messages_for_llm: list[BaseMessage] = [
-        SystemMessage(content=clarification_prompt),
-        *state["messages"],
-    ]
-
-    # Use ainvoke for a complete response (not streaming).
-    response = await _llm_agent.ainvoke(messages_for_llm)
-
-    # `AIMessage.content` is typed as `str | list[str | dict]` in LangChain.
-    # Guard against the list case (tool-call responses, multi-modal models, etc.)
-    # to prevent a TypeError when we later concatenate it into `messages`.
-    raw_content = response.content
-    follow_up_text: str = (
-        raw_content
-        if isinstance(raw_content, str)
-        else " ".join(
-            part if isinstance(part, str) else str(part)
-            for part in raw_content
+    if follow_up_text:
+        # Fast path: reuse pre-generated question from extractor_node
+        logger.info("[ask_human_node] Reusing pre-generated question: %s", follow_up_text)
+    else:
+        # Slow path (fallback): extractor didn't produce a question — generate one now
+        logger.info("[ask_human_node] No pre-generated question; generating for missing fields: %s", missing)
+        missing_str = ", ".join(missing) if missing else "more details"
+        clarification_prompt = (
+            f"You are a helpful assistant for a software agency search platform. "
+            f"The user has not provided enough information to search yet. "
+            f"The following fields are missing or unclear: {missing_str}. "
+            f"Ask ONE short, friendly question in the same language as the user's last message "
+            f"to collect the missing information. Do not list the fields by name; "
+            f"incorporate them naturally into a single question."
         )
-    )
+        messages_for_llm: list[BaseMessage] = [
+            SystemMessage(content=clarification_prompt),
+            *state["messages"],
+        ]
+        response = await _llm_agent.ainvoke(messages_for_llm)
+        raw_content = response.content
+        follow_up_text = (
+            raw_content
+            if isinstance(raw_content, str)
+            else " ".join(
+                part if isinstance(part, str) else str(part)
+                for part in raw_content
+            )
+        )
+        logger.info("[ask_human_node] Generated follow-up: %s", follow_up_text)
 
-    logger.info("[ask_human_node] Follow-up question: %s", follow_up_text)
-
-    # Append the AI's follow-up question to the conversation history
-    updated_messages = list(state["messages"]) + [AIMessage(content=follow_up_text)]
+    # Return ONLY the new AIMessage — add_messages reducer handles merging.
     return {
-        "messages": updated_messages,
+        "messages": [AIMessage(content=follow_up_text)],
         "status": "Asked for clarification"
     }
 
@@ -590,9 +616,9 @@ async def generator_node(state: AgentState) -> dict:
         response_metadata={"agencies": state.get("results", [])}
     )
 
-    updated_messages = list(state["messages"]) + [final_ai_msg]
+    # Return ONLY the new AIMessage — add_messages reducer handles merging.
     return {
-        "messages": updated_messages,
+        "messages": [final_ai_msg],
         "results": results,      # keep results in state for the API layer to access
         "status": "Generated final summary"
     }

@@ -1,11 +1,18 @@
+import logging
+from bson import ObjectId
 from app.utils.error.error import NotFoundException
 from app.utils.validation.object_id_validation import PyObjectId
 from app.utils.common.pagination import ConversationParams
 from app.models.conversation import Conversation
-from app.services.agent_graph import root_agent
+from langgraph.checkpoint.mongodb import MongoDBSaver
 import asyncio
 
+logger = logging.getLogger(__name__)
+
 class ConversationService:
+    def __init__(self, checkpointer: MongoDBSaver) -> None:
+        self._checkpointer = checkpointer
+
     async def get_conversations(
         self, 
         user_id: str, 
@@ -24,22 +31,23 @@ class ConversationService:
         user_id: str, 
         conversation_id: PyObjectId
     ) -> None:
+    
         conversation = await Conversation.find_one(
             Conversation.user_id == user_id, 
-            Conversation.id == conversation_id
+            Conversation.id == ObjectId(conversation_id)
         )
         if not conversation:
             raise NotFoundException("Conversation not found")
 
-        # Clean up LangGraph checkpointer state/history for this thread
-        checkpointer = getattr(root_agent, "checkpointer", None)
-        if checkpointer and not isinstance(checkpointer, bool) and hasattr(checkpointer, "adelete_thread"):
-            try:
-                await checkpointer.adelete_thread(conversation.thread_id)
-            except Exception:
-                pass
-
         await conversation.delete()
 
-
-        
+        if hasattr(self._checkpointer, "adelete_thread"):
+            try:
+                await self._checkpointer.adelete_thread(conversation.thread_id)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to delete LangGraph checkpointer state for thread '%s': %s",
+                    conversation.thread_id,
+                    exc,
+                    exc_info=True,
+                )

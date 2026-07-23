@@ -22,6 +22,7 @@ export const useChat = () => {
     const [hasMoreConversations, setHasMoreConversations] = useState<boolean>(true);
     const [isLoadingMoreConversations, setIsLoadingMoreConversations] = useState<boolean>(false);
     const [activeThreadId, setActiveThreadId] = useState<string>(getOrCreateThreadId());
+    const [deletingConversationId, setDeletingConversationId] = useState<string | null>(null);
     
     const abortControllerRef = useRef<AbortController | null>(null);
     // Ref to cancel in-flight history fetch when token changes mid-flight (race condition fix)
@@ -77,12 +78,63 @@ export const useChat = () => {
         }
     }, [hasMoreConversations, isLoadingMoreConversations, convPage, fetchConversations]);
 
-    // Initial fetch or refresh when streaming finishes
+    // Ref to detect the streaming-ended transition (was true → now false)
+    const prevIsStreamingRef = useRef<boolean>(false);
+
+    // 1. Initial fetch — abortable so React StrictMode's double-mount in dev
+    //    cancels the first in-flight request before the real mount completes.
     useEffect(() => {
-        if (token && !isStreaming) {
+        if (!token) return;
+        const controller = new AbortController();
+
+        const run = async () => {
+            try {
+                const res = await fetch(
+                    `http://localhost:8000/api/v1/conversations?page=1&item_page=10`,
+                    { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal }
+                );
+                if (controller.signal.aborted) return;
+
+                if (res.status === 401) {
+                    const newToken = await refreshToken();
+                    if (!newToken || controller.signal.aborted) return;
+                    const res2 = await fetch(
+                        `http://localhost:8000/api/v1/conversations?page=1&item_page=10`,
+                        { headers: { Authorization: `Bearer ${newToken}` }, signal: controller.signal }
+                    );
+                    if (!res2.ok || controller.signal.aborted) return;
+                    const data = await res2.json();
+                    setConversations(data.docs || []);
+                    setConvPage(data.page || 1);
+                    setHasMoreConversations((data.page || 1) < (data.total_page || 1));
+                    return;
+                }
+
+                if (res.ok && !controller.signal.aborted) {
+                    const data = await res.json();
+                    setConversations(data.docs || []);
+                    setConvPage(data.page || 1);
+                    setHasMoreConversations((data.page || 1) < (data.total_page || 1));
+                }
+            } catch (err: any) {
+                if (err.name !== 'AbortError') {
+                    console.error('Failed to fetch conversations:', err);
+                }
+            }
+        };
+
+        run();
+        return () => controller.abort(); // StrictMode cleanup cancels the first mount's request
+    }, [token, refreshToken]);
+
+    // 2. Refresh list only when streaming ENDS (was true → now false)
+    useEffect(() => {
+        if (prevIsStreamingRef.current && !isStreaming && token) {
             fetchConversations(1, false);
         }
-    }, [token, isStreaming, fetchConversations]);
+        prevIsStreamingRef.current = isStreaming;
+    }, [isStreaming, token, fetchConversations]);
+
 
     // Fetch Chat History
     useEffect(() => {
@@ -167,6 +219,68 @@ export const useChat = () => {
         setActiveThreadId(newId);
         setMessages([]);
     }, []);
+
+    const deleteConversation = useCallback(async (conversationId: string, threadId: string) => {
+        if (!token || deletingConversationId) return;
+
+        // Snapshot before optimistic removal for rollback
+        let removedConv: any = null;
+        let removedIndex = -1;
+
+        // Optimistic UI: remove from sidebar immediately
+        setConversations(prev => {
+            removedIndex = prev.findIndex(c => c._id === conversationId);
+            if (removedIndex !== -1) removedConv = prev[removedIndex];
+            return prev.filter(c => c._id !== conversationId);
+        });
+
+        // If the deleted conversation was active, start a fresh one
+        if (threadId === activeThreadId) {
+            const newId = `thread_${generateId()}`;
+            sessionStorage.setItem('chat_thread_id', newId);
+            setActiveThreadId(newId);
+            setMessages([]);
+        }
+
+        setDeletingConversationId(conversationId);
+        try {
+            const makeRequest = async (authToken: string) =>
+                fetch(`http://localhost:8000/api/v1/conversations/${conversationId}`, {
+                    method: 'DELETE',
+                    headers: { Authorization: `Bearer ${authToken}` },
+                });
+
+            let res = await makeRequest(token);
+            if (res.status === 401) {
+                const newToken = await refreshToken();
+                if (newToken) res = await makeRequest(newToken);
+            }
+
+            if (!res.ok && res.status !== 204) {
+                // Rollback: restore conversation to its original position
+                if (removedConv !== null) {
+                    setConversations(prev => {
+                        const next = [...prev];
+                        next.splice(removedIndex, 0, removedConv);
+                        return next;
+                    });
+                }
+                console.error(`Failed to delete conversation: HTTP ${res.status}`);
+            }
+        } catch (err) {
+            // Rollback on network error
+            if (removedConv !== null) {
+                setConversations(prev => {
+                    const next = [...prev];
+                    next.splice(removedIndex, 0, removedConv);
+                    return next;
+                });
+            }
+            console.error('Failed to delete conversation:', err);
+        } finally {
+            setDeletingConversationId(null);
+        }
+    }, [token, refreshToken, activeThreadId, deletingConversationId]);
 
     const sendMessage = useCallback(async (prompt: string) => {
         if (!prompt.trim() || isStreaming) return;
@@ -366,6 +480,8 @@ export const useChat = () => {
         createNewChat,
         hasMoreConversations,
         isLoadingMoreConversations,
-        loadMoreConversations
+        loadMoreConversations,
+        deleteConversation,
+        deletingConversationId,
     };
 };

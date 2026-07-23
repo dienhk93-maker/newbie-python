@@ -37,6 +37,6 @@ async def delete_conversation(
     conversation_id: PyObjectId,
     conversation_service: FromDishka[ConversationService],
     current_user_id: str = Depends(get_current_user_id)
-):
+) -> None:
     await conversation_service.delete_conversation(current_user_id, conversation_id)
 
