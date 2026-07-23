@@ -30,8 +30,13 @@ class Settings(BaseSettings):
     MINIO_BUCKET: str | None = None
     MINIO_SECURE: bool = False
 
-    #Tavily
+    # Tavily
     TAVILY_API_KEY: str | None = None
+
+    LANGSMITH_TRACING: str | None = None 
+    LANGSMITH_API_KEY: str | None = None
+    LANGSMITH_PROJECT: str = "New python AI"
+    LANGSMITH_ENDPOINT: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -41,3 +46,18 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# ---------------------------------------------------------------------------
+# LangSmith Auto-Export
+# The newer langsmith SDK (>= 0.1.x) reads LANGSMITH_* directly from os.environ.
+# pydantic-settings loads .env into the Settings object but does NOT propagate
+# values to os.environ — so we must do it explicitly here, before any
+# langchain/langgraph module is imported.
+# ---------------------------------------------------------------------------
+import os
+if settings.LANGSMITH_API_KEY and settings.LANGSMITH_TRACING == "true":
+    os.environ["LANGSMITH_TRACING"] = "true"
+    os.environ["LANGSMITH_API_KEY"] = settings.LANGSMITH_API_KEY
+    os.environ["LANGSMITH_PROJECT"] = settings.LANGSMITH_PROJECT
+    os.environ["LANGSMITH_ENDPOINT"] = settings.LANGSMITH_ENDPOINT or "https://api.smith.langchain.com"
+

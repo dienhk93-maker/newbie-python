@@ -29,3 +29,9 @@ class AISearchRequest(BaseModel):
 
 class SearchNextGraph(BaseModel):
     next_agent: Literal["consultant", "search_agent", "FINISH"]
+
+
+class ResumeChatRequest(BaseModel):
+    thread_id: str = Field(..., description="Session ID for LangGraph Checkpointer")
+    approved: bool = Field(default=True, description="User confirmation choice for search filters")
+

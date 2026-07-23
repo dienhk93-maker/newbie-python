@@ -1,8 +1,11 @@
+import app.config
+
 from app.core.di import MinIOProvider
 import sys
 from pathlib import Path
 from app.database import connection
 import warnings
+
 
 # Suppress annoying Pydantic serialization warnings from Langchain/LangGraph
 warnings.filterwarnings("ignore", message=".*Pydantic serializer warnings.*")

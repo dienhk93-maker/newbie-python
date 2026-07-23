@@ -32,6 +32,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, BaseMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END, START
+from langgraph.types import interrupt
 from langchain.agents import create_agent
 
 from app.config import settings
@@ -336,14 +337,19 @@ async def extractor_node(state: AgentState) -> dict:
 
 
 # Create superviser_node
-async def supervisor_node(state: SupervisorState):
-    messages_for_llm: list[BaseMessage] = [
-        SystemMessage(content=SUPERVISOR_SEARCH_NODE_PROMPT),
-        *state["messages"],
-    ]
-
+async def supervisor_node(state: SupervisorState, config: RunnableConfig):
+    """
+    Node 1 – Supervisor
+    --------------------
+    Examines the user's input and decides whether to route to the search_agent (for agency search)
+    or the consultant (for general advice).
+    """
+    logger.info("[supervisor_node] Analyzing request intent...")
+    system_prompt = SUPERVISOR_SEARCH_NODE_PROMPT
+    messages_for_llm = [SystemMessage(content=system_prompt)] + state["messages"]
+    
     try:
-        raw = await _llm_agent_structured.ainvoke(messages_for_llm)
+        raw = await _llm_agent_structured.ainvoke(messages_for_llm, config)
         data = raw.next_agent if isinstance(raw, SearchNextGraph) else "FINISH"
     except Exception as e:
         import traceback
@@ -359,7 +365,7 @@ async def supervisor_node(state: SupervisorState):
     }
 
 
-async def consultant_node(state: SupervisorState):
+async def consultant_node(state: SupervisorState, config: RunnableConfig):
     """
     Acts as a software development consultant with web search capability.
     Provides advice, architectures, estimations, etc.
@@ -369,7 +375,8 @@ async def consultant_node(state: SupervisorState):
     
     # We invoke the sub-agent with the conversation history.
     # create_react_agent handles the state_modifier (SystemMessage) automatically.
-    result = await consultant_agent.ainvoke({"messages": state["messages"]})
+    logger.info("[consultant_node] Consulting with expert agent...")
+    result = await consultant_agent.ainvoke({"messages": state["messages"]}, config)
     
     # Log the full message chain to see if the tool was actually called
     for i, msg in enumerate(result["messages"]):
@@ -424,7 +431,7 @@ def router(state: AgentState) -> Literal["ask_human_node", "search_db_node"]:
     return "ask_human_node"
 
 
-async def ask_human_node(state: AgentState) -> dict:
+async def ask_human_node(state: AgentState, config: RunnableConfig) -> dict:
     """
     Node 3 – Clarification Question
     ---------------------------------
@@ -456,7 +463,7 @@ async def ask_human_node(state: AgentState) -> dict:
             SystemMessage(content=clarification_prompt),
             *state["messages"],
         ]
-        response = await _llm_agent.ainvoke(messages_for_llm)
+        response = await _llm_agent.ainvoke(messages_for_llm, config)
         raw_content = response.content
         follow_up_text = (
             raw_content
@@ -473,6 +480,42 @@ async def ask_human_node(state: AgentState) -> dict:
         "messages": [AIMessage(content=follow_up_text)],
         "status": "Asked for clarification"
     }
+
+
+async def confirm_search_node(state: AgentState) -> dict:
+    """
+    Human-in-the-Loop Node (interrupt)
+    -----------------------------------
+    Pauses graph execution to ask the user to confirm the extracted search filters
+    before executing the vector search.
+    """
+    filters_info = {
+        "budget": state.get("budget"),
+        "team_size": state.get("team_size"),
+        "domain": state.get("domain"),
+        "tech_stack": state.get("tech_stack"),
+    }
+    logger.info("[confirm_search_node] Triggering interrupt for filter confirmation: %s", filters_info)
+
+    # Interrupt graph execution and wait for user response via Command(resume=...)
+    user_response = interrupt({
+        "type": "confirm_search",
+        "question": "Would you like to search for software agencies with these filters?",
+        "filters": filters_info,
+    })
+
+    logger.info("[confirm_search_node] Resumed with response: %s", user_response)
+
+    if isinstance(user_response, dict) and user_response.get("approved") is False:
+        logger.info("[confirm_search_node] User rejected search filters.")
+        return {
+            "is_sufficient": False,
+            "follow_up_question": "Search cancelled. What domain, budget, or technologies would you like to search for instead?",
+            "status": "Search cancelled by user",
+        }
+
+    logger.info("[confirm_search_node] User approved search filters.")
+    return {"status": "User confirmed search filters"}
 
 
 async def search_db_node(state: AgentState, config: RunnableConfig) -> dict:
@@ -557,7 +600,7 @@ async def search_db_node(state: AgentState, config: RunnableConfig) -> dict:
     }
 
 
-async def generator_node(state: AgentState) -> dict:
+async def generator_node(state: AgentState, config: RunnableConfig) -> dict:
     """
     Node 5 – Response Generator
     ----------------------------
@@ -595,24 +638,18 @@ async def generator_node(state: AgentState) -> dict:
         *state["messages"],
     ]
 
-    # Collect all streamed chunks into a single string.
-    # Each chunk's `.content` can be `str | list` — extract the string part only.
-    full_response = ""
-    async for chunk in _llm_agent.astream(messages_for_llm):
-        chunk_content = getattr(chunk, "content", "")
-        if isinstance(chunk_content, str):
-            full_response += chunk_content
-        elif isinstance(chunk_content, list):
-            # Multi-part content block (e.g. tool-call or vision response)
-            full_response += "".join(
-                part if isinstance(part, str) else ""
-                for part in chunk_content
-            )
+    response = await _llm_agent.ainvoke(messages_for_llm, config)
+    
+    raw_content = response.content
+    content_str: str = (
+        raw_content
+        if isinstance(raw_content, str)
+        else "".join(part if isinstance(part, str) else "" for part in raw_content)
+    )
 
-    logger.info("[generator_node] Response generated (%d chars)", len(full_response))
-    # Custom metadata include search data
+    logger.info("[generator_node] Response generated (%d chars)", len(content_str))
     final_ai_msg = AIMessage(
-        content=full_response,
+        content=content_str,
         response_metadata={"agencies": state.get("results", [])}
     )
 
@@ -624,6 +661,55 @@ async def generator_node(state: AgentState) -> dict:
     }
 
 
+
+
+# ---------------------------------------------------------------------------
+# 4b. CONFIRM SEARCH NODE  (Human-in-the-Loop interrupt)
+# ---------------------------------------------------------------------------
+
+async def confirm_search_node(state: AgentState) -> dict:
+    """
+    Pauses graph execution and asks the user to confirm the extracted filters
+    before running the DB search.
+
+    LangGraph will emit an `on_interrupt` event during astream_events, which
+    the API layer converts to an SSE `interrupt` event for the frontend.
+
+    The frontend then shows a confirm card. When the user responds, the API
+    calls /chat/resume with `approved=True/False`, which resumes this node.
+    The `Command(resume=approved)` value becomes the return value of interrupt().
+    """
+    filters = {
+        "budget": state.get("budget"),
+        "team_size": state.get("team_size"),
+        "domain": state.get("domain", []),
+        "tech_stack": state.get("tech_stack", []),
+    }
+
+    # Remove None/empty entries for cleaner display
+    filters_clean = {k: v for k, v in filters.items() if v not in (None, [], {})}
+
+    question = (
+        "I found the following search filters from your request. "
+        "Shall I proceed with the search?"
+    )
+
+    logger.info("[confirm_search_node] Interrupting for user confirmation. filters=%s", filters_clean)
+
+    # interrupt() pauses execution and surfaces the value to the API layer via on_interrupt.
+    # The return value of interrupt() will be whatever Command(resume=...) is passed on resume.
+    approved = interrupt({
+        "type": "confirm_search",
+        "question": question,
+        "filters": filters_clean,
+    })
+
+    logger.info("[confirm_search_node] Resumed with approved=%s", approved)
+
+    if approved:
+        return {"is_sufficient": True, "status": "User confirmed search filters"}
+    else:
+        return {"is_sufficient": False, "status": "User declined — asking for different filters"}
 
 
 # ---------------------------------------------------------------------------
@@ -664,6 +750,7 @@ def build_search_subgraph():
     # -- Step 2: Register all nodes ------------------------------------------
     graph_builder.add_node("extractor_node", extractor_node)
     graph_builder.add_node("ask_human_node", ask_human_node)
+    graph_builder.add_node("confirm_search_node", confirm_search_node)
     graph_builder.add_node("search_db_node", search_db_node)
     graph_builder.add_node("generator_node", generator_node)
 
@@ -672,17 +759,23 @@ def build_search_subgraph():
     # The graph always starts at extractor_node
     graph_builder.add_edge(START, "extractor_node")
 
-    # After extraction, the router decides the next step.
-    # add_conditional_edges(source, path_fn, mapping)
-    #   - source     : the node that just finished
-    #   - path_fn    : a function that returns a string key
-    #   - mapping    : dict mapping string keys -> node names (or END)
+    # After extraction, router decides: ask_human or confirm_search_node (interrupt)
     graph_builder.add_conditional_edges(
         "extractor_node",
         router,
         {
             "ask_human_node": "ask_human_node",
+            "search_db_node": "confirm_search_node",
+        },
+    )
+
+    # After confirm_search_node interrupt resumes: proceed to search or ask_human if rejected
+    graph_builder.add_conditional_edges(
+        "confirm_search_node",
+        lambda state: "search_db_node" if state.get("is_sufficient", True) else "ask_human_node",
+        {
             "search_db_node": "search_db_node",
+            "ask_human_node": "ask_human_node",
         },
     )
 

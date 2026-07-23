@@ -23,6 +23,8 @@ export const useChat = () => {
     const [isLoadingMoreConversations, setIsLoadingMoreConversations] = useState<boolean>(false);
     const [activeThreadId, setActiveThreadId] = useState<string>(getOrCreateThreadId());
     const [deletingConversationId, setDeletingConversationId] = useState<string | null>(null);
+    // Holds the interrupt payload when LangGraph pauses for human confirmation
+    const [pendingInterrupt, setPendingInterrupt] = useState<Record<string, any> | null>(null);
     
     const abortControllerRef = useRef<AbortController | null>(null);
     // Ref to cancel in-flight history fetch when token changes mid-flight (race condition fix)
@@ -412,6 +414,18 @@ export const useChat = () => {
                         } catch (e) {
                             console.error('[useChat] Failed to parse search_results:', e);
                         }
+                    } else if (eventType === 'interrupt') {
+                        // LangGraph paused — store interrupt payload so UI can render confirm card
+                        try {
+                            const interruptData = JSON.parse(rawData);
+                            console.log('[useChat] Interrupt received:', interruptData);
+                            setPendingInterrupt({ ...interruptData, aiMsgId });
+                            // REMOVE the empty AI placeholder — the ConfirmCard replaces it.
+                            // Keeping an empty bubble is confusing to the user.
+                            setMessages(prev => prev.filter(msg => msg.id !== aiMsgId));
+                        } catch (e) {
+                            console.error('[useChat] Failed to parse interrupt data:', e);
+                        }
                     } else {
                         // Default: streaming text chunk
                         const textChunk = rawData.replace(/\\n/g, '\n');
@@ -468,6 +482,106 @@ export const useChat = () => {
         }
     }, []);
 
+    /**
+     * Resume a paused LangGraph thread after a human-in-the-loop interrupt.
+     * Calls POST /chat/resume and streams the continuation exactly like sendMessage.
+     */
+    const resumeSearch = useCallback(async (approved: boolean) => {
+        if (!pendingInterrupt || isStreaming) return;
+        setPendingInterrupt(null);
+
+        // Add a new AI message placeholder for the resumed stream
+        const resumeAiMsgId = generateId();
+        setMessages(prev => [
+            ...prev,
+            { id: resumeAiMsgId, role: 'ai', content: '', isStreaming: true }
+        ]);
+        setIsStreaming(true);
+
+        try {
+            const makeRequest = async (authToken: string | null) =>
+                fetch('http://localhost:8000/api/v1/ai-search/chat/resume', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+                    },
+                    body: JSON.stringify({ thread_id: activeThreadId, approved }),
+                });
+
+            let response = await makeRequest(token);
+            if (response.status === 401) {
+                const newToken = await refreshToken();
+                if (newToken) response = await makeRequest(newToken);
+                else throw new Error('Session expired.');
+            }
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            if (!response.body) throw new Error('No stream body');
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder('utf-8');
+            let currentContent = '';
+            let buf = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buf += decoder.decode(value, { stream: true });
+                const blocks = buf.split('\n\n');
+                buf = blocks.pop() ?? '';
+
+                for (const block of blocks) {
+                    if (!block.trim()) continue;
+                    const lines = block.split('\n');
+                    let eventType = 'message';
+                    const dataLines: string[] = [];
+                    for (const line of lines) {
+                        if (line.startsWith('event: ')) eventType = line.slice(7).trim();
+                        else if (line.startsWith('data: ')) dataLines.push(line.slice(6));
+                    }
+                    const raw = dataLines.join('');
+                    if (!raw) continue;
+
+                    if (eventType === 'search_results') {
+                        try {
+                            const agencies = JSON.parse(raw);
+                            setMessages(prev => prev.map(m =>
+                                m.id === resumeAiMsgId ? { ...m, agencies } : m
+                            ));
+                        } catch { /* ignore */ }
+                    } else if (eventType === 'status_update') {
+                        try {
+                            const { status } = JSON.parse(raw);
+                            setMessages(prev => prev.map(m => {
+                                if (m.id !== resumeAiMsgId) return m;
+                                const cur = m.statuses || [];
+                                return cur.includes(status) ? m : { ...m, statuses: [...cur, status] };
+                            }));
+                        } catch { /* ignore */ }
+                    } else {
+                        const chunk = raw.replace(/\\n/g, '\n');
+                        currentContent += chunk;
+                        setMessages(prev => prev.map(m =>
+                            m.id === resumeAiMsgId ? { ...m, content: currentContent } : m
+                        ));
+                    }
+                }
+            }
+        } catch (err: any) {
+            console.error('[resumeSearch] Error:', err);
+            setMessages(prev => prev.map(m =>
+                m.id === resumeAiMsgId
+                    ? { ...m, isStreaming: false, isError: true, content: '[Resume Error]' }
+                    : m
+            ));
+        } finally {
+            setMessages(prev => prev.map(m =>
+                m.id === resumeAiMsgId ? { ...m, isStreaming: false } : m
+            ));
+            setIsStreaming(false);
+        }
+    }, [pendingInterrupt, isStreaming, activeThreadId, token, refreshToken]);
+
     return { 
         messages, 
         sendMessage, 
@@ -483,5 +597,7 @@ export const useChat = () => {
         loadMoreConversations,
         deleteConversation,
         deletingConversationId,
+        pendingInterrupt,
+        resumeSearch,
     };
 };

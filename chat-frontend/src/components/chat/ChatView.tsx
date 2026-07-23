@@ -30,6 +30,8 @@ export const ChatView: React.FC = () => {
     loadMoreConversations,
     deleteConversation,
     deletingConversationId,
+    pendingInterrupt,
+    resumeSearch,
   } = useChat();
   const chatEndRef = useRef<HTMLDivElement>(null);
   // Tracks which conversation is "armed" for deletion (first click)
@@ -427,6 +429,70 @@ export const ChatView: React.FC = () => {
         {/* Input area */}
         <div className="flex-shrink-0 px-4 pb-5 pt-3">
           <div className="max-w-3xl mx-auto">
+
+            {/* ── Human-in-the-Loop Confirm Card ── */}
+            {pendingInterrupt && (
+              <div className="mb-3 rounded-2xl border border-indigo-500/30 bg-indigo-500/10 backdrop-blur-sm p-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                <div className="flex items-start gap-3 mb-3">
+                  <div className="w-8 h-8 rounded-xl bg-indigo-500/20 border border-indigo-400/30 flex items-center justify-center flex-shrink-0 mt-0.5">
+                    <svg className="w-4 h-4 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                    </svg>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold text-white mb-1">Confirm Search Filters</p>
+                    <p className="text-xs text-gray-400">{pendingInterrupt.question || 'Search with these filters?'}</p>
+                  </div>
+                </div>
+
+                {/* Filter pills */}
+                <div className="flex flex-wrap gap-2 mb-4 pl-11">
+                  {pendingInterrupt.filters?.domain?.map((d: string) => (
+                    <span key={d} className="px-2.5 py-0.5 rounded-full text-xs bg-violet-500/20 border border-violet-400/30 text-violet-300">
+                      🏷 {d}
+                    </span>
+                  ))}
+                  {pendingInterrupt.filters?.tech_stack?.map((t: string) => (
+                    <span key={t} className="px-2.5 py-0.5 rounded-full text-xs bg-cyan-500/20 border border-cyan-400/30 text-cyan-300">
+                      ⚙️ {t}
+                    </span>
+                  ))}
+                  {pendingInterrupt.filters?.budget && (
+                    <span className="px-2.5 py-0.5 rounded-full text-xs bg-emerald-500/20 border border-emerald-400/30 text-emerald-300">
+                      💰 {pendingInterrupt.filters.budget.operator} ${pendingInterrupt.filters.budget.value?.toLocaleString()}
+                    </span>
+                  )}
+                  {pendingInterrupt.filters?.team_size && (
+                    <span className="px-2.5 py-0.5 rounded-full text-xs bg-amber-500/20 border border-amber-400/30 text-amber-300">
+                      👥 team {pendingInterrupt.filters.team_size.operator} {pendingInterrupt.filters.team_size.value}
+                    </span>
+                  )}
+                </div>
+
+                {/* Confirm / Cancel buttons */}
+                <div className="flex gap-2 pl-11">
+                  <button
+                    onClick={() => resumeSearch(true)}
+                    className="flex items-center gap-1.5 px-4 py-1.5 rounded-xl text-sm font-medium bg-indigo-600 hover:bg-indigo-500 text-white transition-all duration-150 shadow-lg shadow-indigo-500/20"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                    </svg>
+                    Yes, search!
+                  </button>
+                  <button
+                    onClick={() => resumeSearch(false)}
+                    className="flex items-center gap-1.5 px-4 py-1.5 rounded-xl text-sm font-medium bg-white/[0.06] hover:bg-white/[0.12] text-gray-300 border border-white/[0.10] transition-all duration-150"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                    Change filters
+                  </button>
+                </div>
+              </div>
+            )}
+
             <ChatInput
               onSend={sendMessage}
               isStreaming={isStreaming}

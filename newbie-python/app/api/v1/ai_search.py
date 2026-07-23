@@ -3,7 +3,7 @@ from fastapi import Depends
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from dishka.integrations.fastapi import FromDishka, inject
-from app.schemas.ai_search import AISearchRequest
+from app.schemas.ai_search import AISearchRequest, ResumeChatRequest
 from app.services.ai_search_service import AiSearchService
 from app.services.openai_service import OpenAIService
 from app.services.qdrant_service import QdrantService
@@ -80,7 +80,11 @@ async def chat_stream(
     }
 
     async def event_generator():
+        streamed_nodes = set()
         async for event in root_agent.astream_events(new_input, config=config, version="v2"):
+            # ── DIAGNOSTIC: log every event type so we can trace what the graph emits ──
+            event_name = event.get("name", "?")
+            logger.info("[stream_event] type=%s name=%s", event["event"], event_name)
             if event["event"] == "on_chain_end" and event.get("name") == "search_db_node":
                 node_output = event.get("data", {}).get("output", {})
                 results = node_output.get("results", [])
@@ -89,16 +93,32 @@ async def chat_stream(
                     json_data = json.dumps(results, ensure_ascii=False)
                     yield f"event: search_results\ndata: {json_data}\n\n"
 
+            if event["event"] == "on_chain_end" and event.get("name") in ["ask_human_node", "consultant", "consultant_node"]:
+                node_name = event.get("name")
+                if node_name not in streamed_nodes:
+                    node_output = event.get("data", {}).get("output", {})
+                    messages = node_output.get("messages", [])
+                    if messages and hasattr(messages[-1], "content"):
+                        text = messages[-1].content
+                        if isinstance(text, str) and text:
+                            streamed_nodes.add(node_name)
+                            safe_chunk = text.replace("\n", "\\n")
+                            yield f"data: {safe_chunk}\n\n"
+
             if event["event"] == "on_chat_model_stream":
-                node_name = event.get("metadata", {}).get("langgraph_node")
+                meta_node = event.get("metadata", {}).get("langgraph_node", "")
                 chunk = event["data"]["chunk"]
-                # Skip tool_call chunks (they have no text, only tool_calls)
+                # Skip tool_call chunks (structured output / function calls)
                 if chunk.tool_call_chunks:
-                    logger.debug("[stream] node=%s: tool_call_chunk detected (skipping text stream)", node_name)
                     continue
-                if node_name in ["generator_node", "ask_human_node", "consultant", "consultant_node", "agent", "model"]:
-                    text = chunk.content
-                    if isinstance(text, str) and text:
+                text = chunk.content
+                if isinstance(text, str) and text:
+                    logger.info("[stream] on_chat_model_stream langgraph_node=%r preview=%r", meta_node, text[:40])
+                    # Only stream from text-generation nodes, not from structured-output nodes
+                    # (supervisor_node / extractor_node emit JSON — we must exclude them).
+                    # Use endswith() to handle subgraph namespace prefix e.g. "search_agent:generator_node".
+                    STREAM_NODES = {"generator_node", "ask_human_node", "consultant", "consultant_node", "agent"}
+                    if any(meta_node == n or meta_node.endswith(f":{n}") for n in STREAM_NODES):
                         safe_chunk = text.replace("\n", "\\n")
                         yield f"data: {safe_chunk}\n\n"
 
@@ -110,7 +130,8 @@ async def chat_stream(
                     "ask_human_node": "Formatting clarification question...",
                     "search_db_node": "Searching database for agencies...",
                     "generator_node": "Generating final summary...",
-                    "consultant": "Consulting with expert agent (this might take a bit)..."
+                    "consultant": "Consulting with expert agent (this might take a bit)...",
+                    "consultant_node": "Consulting with expert agent (this might take a bit)..."
                 }
                 if node_name in status_messages:
                     msg = status_messages[node_name]
@@ -130,11 +151,104 @@ async def chat_stream(
                     json_data = json.dumps({"status": tool_msg}, ensure_ascii=False)
                     yield f"event: status_update\ndata: {json_data}\n\n"
 
-            # Log tool execution events for debugging
+            # ── Catch Human-in-the-Loop Interrupts ──
+            if event["event"] == "on_chain_stream":
+                chunk = event.get("data", {}).get("chunk", {})
+                if isinstance(chunk, dict) and "__interrupt__" in chunk:
+                    interrupts = chunk["__interrupt__"]
+                    if interrupts:
+                        # interrupts is a tuple of Interrupt objects
+                        interrupt_obj = interrupts[0]
+                        if isinstance(interrupt_obj, dict):
+                            interrupt_value = interrupt_obj.get("value", {})
+                        else:
+                            interrupt_value = getattr(interrupt_obj, "value", {})
+                        
+                        import json
+                        logger.info("[stream] Emitting interrupt event with value: %s", interrupt_value)
+                        json_data = json.dumps(interrupt_value, ensure_ascii=False)
+                        yield f"event: interrupt\ndata: {json_data}\n\n"
+
+
             if event["event"] == "on_tool_end":
                 tool_name = event.get("name", "")
                 tool_output = event.get("data", {}).get("output", "")
                 logger.info("[stream] Tool '%s' executed → output: %s", tool_name, str(tool_output)[:300])
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@router.post("/chat/resume")
+@inject
+async def chat_resume(
+    request: ResumeChatRequest,
+    qdrant_service: FromDishka[QdrantService],
+    openai_service: FromDishka[OpenAIService],
+    profile_service: FromDishka[ProfileService],
+    current_user_id: str = Depends(get_current_user_id)
+):
+    """Resume a paused LangGraph thread after Human-in-the-Loop interrupt"""
+    from langgraph.types import Command
+
+    config = {
+        "configurable": {
+            "thread_id": request.thread_id,
+            "qdrant_service": qdrant_service,
+            "openai_service": openai_service,
+            "profile_service": profile_service,
+        }
+    }
+
+    async def event_generator():
+        streamed_nodes = set()
+        resume_command = Command(resume=request.approved)
+
+        async for event in root_agent.astream_events(resume_command, config=config, version="v2"):
+            if event["event"] == "on_chain_end" and event.get("name") == "search_db_node":
+                node_output = event.get("data", {}).get("output", {})
+                results = node_output.get("results", [])
+                if results:
+                    import json
+                    json_data = json.dumps(results, ensure_ascii=False)
+                    yield f"event: search_results\ndata: {json_data}\n\n"
+
+            if event["event"] == "on_chain_end" and event.get("name") in ["ask_human_node", "consultant", "consultant_node"]:
+                node_name = event.get("name")
+                if node_name not in streamed_nodes:
+                    node_output = event.get("data", {}).get("output", {})
+                    messages = node_output.get("messages", [])
+                    if messages and hasattr(messages[-1], "content"):
+                        text = messages[-1].content
+                        if isinstance(text, str) and text:
+                            streamed_nodes.add(node_name)
+                            safe_chunk = text.replace("\n", "\\n")
+                            yield f"data: {safe_chunk}\n\n"
+
+            if event["event"] == "on_chat_model_stream":
+                meta_node = event.get("metadata", {}).get("langgraph_node", "")
+                chunk = event["data"]["chunk"]
+                if chunk.tool_call_chunks:
+                    continue
+                text = chunk.content
+                if isinstance(text, str) and text:
+                    STREAM_NODES = {"generator_node", "ask_human_node", "consultant", "consultant_node", "agent"}
+                    if any(meta_node == n or meta_node.endswith(f":{n}") for n in STREAM_NODES):
+                        if meta_node:
+                            streamed_nodes.add(meta_node)
+                        safe_chunk = text.replace("\n", "\\n")
+                        yield f"data: {safe_chunk}\n\n"
+
+            if event["event"] == "on_chain_start":
+                node_name = event.get("name")
+                status_messages = {
+                    "search_db_node": "Searching database for agencies...",
+                    "generator_node": "Generating final summary...",
+                }
+                if node_name in status_messages:
+                    msg = status_messages[node_name]
+                    import json
+                    json_data = json.dumps({"status": msg}, ensure_ascii=False)
+                    yield f"event: status_update\ndata: {json_data}\n\n"
+
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
